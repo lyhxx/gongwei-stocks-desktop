@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>工位看盘</title>
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<header class="top">
+  <div class="status-block">
+    <p id="status">连接中…</p>
+  </div>
+  <div class="top-actions">
+    <button id="btnRefresh" title="立即刷新">刷新</button>
+    <button id="btnFloat" title="显示/隐藏浮窗 Ctrl+Shift+M">浮窗</button>
+    <div class="more-wrap">
+      <button id="btnMore" title="更多操作">⋯</button>
+      <div id="moreMenu" class="more-menu" hidden>
+        <button id="btnOpenSettings">设置</button>
+        <button id="btnGoSelftest">接口自检</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="section-head">
+    <h2>指数 <button id="btnIndicesManage" class="link-btn" title="选择显示哪些指数">管理</button></h2>
+  </div>
+  <div id="indices" class="indices-grid"></div>
+  <div id="indicesManage" class="indices-manage" hidden></div>
+</section>
+
+<section>
+  <div class="section-head">
+    <h2>自选 <span id="stockCount"></span></h2>
+    <div class="search-inline">
+      <input id="kw" placeholder="加自选：代码/名称/拼音" autocomplete="off" />
+      <div id="suggest" class="suggest" hidden></div>
+    </div>
+  </div>
+  <div id="stocks"></div>
+</section>
+
+<footer>余光一扫，涨跌了然。关闭窗口进托盘，Ctrl+Shift+M 切换浮窗。<br/><span id="appVer"></span></footer>
+
+<div id="modalOverlay" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><strong id="modalTitle"></strong><button id="modalClose" title="关闭">✕</button></div>
+    <div id="modalBody" class="modal-body"></div>
+  </div>
+</div>
+<script src="./app.js"></script>
+</body>
+</html>

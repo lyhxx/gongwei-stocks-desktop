@@ -1,0 +1,27 @@
+// 工位看盘 - 预加载桥
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('gongwei', {
+  getStore: () => ipcRenderer.invoke('store:get'),
+  getVersion: () => ipcRenderer.invoke('app:version'),
+  getMarket: () => ipcRenderer.invoke('market:get'),
+  refreshMarket: () => ipcRenderer.invoke('market:refresh'),
+  search: (keyword) => ipcRenderer.invoke('search', keyword),
+  addStock: (item) => ipcRenderer.invoke('stocks:add', item),
+  removeStock: (id) => ipcRenderer.invoke('stocks:remove', id),
+  updateAlert: (id, alert) => ipcRenderer.invoke('stocks:update-alert', { id, alert }),
+  updateStock: (id, patch) => ipcRenderer.invoke('stocks:update', { id, patch }),
+  moveStock: (id, dir) => ipcRenderer.invoke('stocks:move', { id, dir }),
+  snoozeStock: (id, minutes) => ipcRenderer.invoke('stocks:snooze', { id, minutes }),
+  updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
+  toggleIndex: (id, on) => ipcRenderer.invoke('indices:toggle', { id, on }),
+  toggleFloat: () => ipcRenderer.invoke('float:toggle'),
+  hideFloat: () => ipcRenderer.invoke('float:hide'),
+  floatResize: (h) => ipcRenderer.send('float:resize', h),
+  testNotify: () => ipcRenderer.invoke('notify:test'),
+  diagnose: () => ipcRenderer.invoke('diagnose'),
+  selftest: () => ipcRenderer.invoke('selftest'),
+  onMarket: (cb) => ipcRenderer.on('market:update', (_e, data) => cb(data)),
+  onStore: (cb) => ipcRenderer.on('store:changed', (_e, data) => cb(data)),
+  onAlert: (cb) => ipcRenderer.on('alert:trigger', (_e, data) => cb(data)),
+});

@@ -1,0 +1,71 @@
+html, body { margin: 0; background: transparent; font-family: "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; }
+.card {
+  position: relative;
+  background: rgba(248, 250, 252, .97);
+  border: 1px solid rgba(148, 163, 184, .5);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 16px 42px rgba(15, 23, 42, .18);
+  -webkit-app-region: drag;
+}
+/* 左侧一条强调色，主界面同款视觉语言 */
+.card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: #336fff; }
+
+/* 顶栏：极简，只放更新时间和涨跌家数 */
+header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 9px 4px 11px;
+  border-bottom: 1px solid rgba(148, 163, 184, .35);
+}
+header span { font-size: 10px; color: #64748b; font-variant-numeric: tabular-nums; }
+#stat { letter-spacing: .3px; }
+
+/* 指数：横排卡片，自适应每行 3~4 个 */
+.idx-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+  gap: 5px; padding: 6px 8px 6px 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, .35);
+}
+.idx-grid:empty { display: none; }
+.idx-card {
+  min-width: 0; padding: 4px 6px; border-radius: 6px;
+  background: rgba(255, 255, 255, .6); border: 1px solid rgba(148, 163, 184, .3);
+}
+.idx-name { font-size: 10px; color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.idx-price { font-size: 12px; font-weight: 800; margin-top: 1px; font-variant-numeric: tabular-nums; }
+.idx-pct { font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* 个股列表 */
+.list { padding: 3px 8px 4px 10px; max-height: 252px; overflow-y: auto; overflow-x: hidden; }
+.line { display: grid; grid-template-columns: minmax(0, 1fr) 58px 60px; gap: 6px; align-items: center; min-height: 25px; font-size: 12px; }
+.line .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.line strong { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+.line em { font-style: normal; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.up { color: #d92d20; }
+.down { color: #079455; }
+.empty { padding: 14px 8px; text-align: center; color: #64748b; font-size: 11px; line-height: 1.7; }
+
+.flash { animation: flash .6s ease 3; }
+@keyframes flash { 50% { background: rgba(51, 111, 255, .25); } }
+
+/* 滚动条（与主界面同一套风格） */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #c3cad4; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+::-webkit-scrollbar-button, ::-webkit-scrollbar-corner { display: none; width: 0; height: 0; background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: #c3cad4 transparent; }
+
+/* 深色跟随主窗口主题 */
+.card[data-theme="dark"] { background: rgba(20, 28, 40, .97); border-color: rgba(100, 116, 139, .6); color: #e6edf5; }
+.card[data-theme="dark"] header { border-bottom-color: rgba(100, 116, 139, .45); }
+.card[data-theme="dark"] header span { color: #a8b3c2; }
+.card[data-theme="dark"] .idx-grid { border-bottom-color: rgba(100, 116, 139, .45); }
+.card[data-theme="dark"] .idx-card { background: rgba(38, 53, 71, .55); border-color: rgba(100, 116, 139, .4); }
+.card[data-theme="dark"] .idx-name { color: #a8b3c2; }
+.card[data-theme="dark"] .empty { color: #a8b3c2; }
+.card[data-theme="dark"] .up { color: #ff6b61; }
+.card[data-theme="dark"] .down { color: #34d399; }
+.card[data-theme="dark"] ::-webkit-scrollbar-thumb { background: #3b4a61; }
+.card[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #55677f; }

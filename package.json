@@ -1,0 +1,69 @@
+{
+  "name": "gongwei-stocks-desktop",
+  "version": "1.0.0",
+  "description": "工位看盘 - 隐蔽轻量的 Windows 桌面股票行情提醒助手",
+  "productName": "工位看盘",
+  "main": "src/main.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lyhxx/gongwei-stocks-desktop.git"
+  },
+  "homepage": "https://github.com/lyhxx/gongwei-stocks-desktop#readme",
+  "bugs": {
+    "url": "https://github.com/lyhxx/gongwei-stocks-desktop/issues"
+  },
+  "author": "lyhxx",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/audit.js && node test/providers.test.js && node test/dom.test.js",
+    "release:notes": "node scripts/release-notes.js",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --win --dir",
+    "pack:nsis": "electron-builder --win nsis",
+    "pack:portable": "electron-builder --win portable",
+    "pack:zip": "electron-builder --win zip"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "jsdom": "^24.1.3"
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  },
+  "build": {
+    "appId": "com.gongwei.stocks.desktop",
+    "productName": "工位看盘",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis",
+        "portable",
+        "zip"
+      ],
+      "artifactName": "工位看盘-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "工位看盘"
+    },
+    "portable": {
+      "artifactName": "工位看盘-${version}-绿色单文件.${ext}"
+    },
+    "zip": {
+      "artifactName": "工位看盘-${version}-绿色解压版-${arch}.${ext}"
+    }
+  }
+}
