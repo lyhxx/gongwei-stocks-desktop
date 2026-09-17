@@ -40,8 +40,11 @@ function extractSection(markdown, version) {
   for (let i = start + 1; i < lines.length; i += 1) {
     if (/^##\s+/.test(lines[i])) { end = i; break; }
   }
-  // 去掉标题行本身，只留内容
-  return lines.slice(start + 1, end).join('\n').trim();
+  // 去掉标题行本身；末尾的链接引用定义（[x]: url）属于文档导航，不该进 Release 说明
+  const body = lines
+    .slice(start + 1, end)
+    .filter((l) => !/^\s*\[[^\]]+\]:\s+https?:\/\//.test(l));
+  return body.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function main() {
