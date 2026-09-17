@@ -23,13 +23,20 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      - name: Test (audit + providers + dom)
+      - name: Test (build config + audit + providers + dom)
         run: npm test
 
+      # --publish never：产物只落到 dist/，Release 统一交给下面的 action-gh-release，
+      # 避免 electron-builder 和 action 各发一次导致资产重复、说明被清空
       - name: Build win (nsis + portable + zip)
         run: npm run dist
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check artifacts
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist -Include *.exe,*.zip -File
+          $files | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          if ($files.Count -lt 3) { throw "产物数量不足（期望 3 个，实际 $($files.Count) 个）" }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

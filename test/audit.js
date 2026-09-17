@@ -60,6 +60,16 @@ if (!new RegExp(`^##\\s+\\[?v?${pkg.version.replace(/\./g, '\\.')}\\]?`, 'm').te
 }
 if (!readme.includes('DEVELOPMENT.md')) problems.push('README 未链接到开发文档');
 
+// Markdown 表格单元格别太长：渲染时会把列挤窄导致折行，长说明应放到表格外的列表
+const displayWidth = (s) => [...s].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e80 ? 2 : 1), 0);
+for (const doc of ['README.md', 'CHANGELOG.md', 'docs/DEVELOPMENT.md']) {
+  read(doc).split(/\r?\n/).forEach((line, i) => {
+    if (line.startsWith('|') && displayWidth(line) > 110) {
+      problems.push(`${doc}:${i + 1} 表格行过宽（${displayWidth(line)} 列），渲染会折行，请把长说明移到表格外`);
+    }
+  });
+}
+
 // 危险用法排查
 for (const [label, js] of [['renderer', appJs], ['float', floatJs]]) {
   if (/innerHTML\s*=\s*[^`'"]*(?:stock|quote|search|\bname\b)/.test(js) && !js.includes('escapeHtml')) {

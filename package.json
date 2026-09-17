@@ -17,11 +17,11 @@
     "start": "electron .",
     "test": "node scripts/validate-build-config.js && node test/audit.js && node test/providers.test.js && node test/dom.test.js",
     "release:notes": "node scripts/release-notes.js",
-    "dist": "electron-builder --win",
+    "dist": "electron-builder --win --publish never",
     "dist:dir": "electron-builder --win --dir",
-    "pack:nsis": "electron-builder --win nsis",
-    "pack:portable": "electron-builder --win portable",
-    "pack:zip": "electron-builder --win zip"
+    "pack:nsis": "electron-builder --win nsis --publish never",
+    "pack:portable": "electron-builder --win portable --publish never",
+    "pack:zip": "electron-builder --win zip --publish never"
   },
   "license": "MIT",
   "devDependencies": {
@@ -50,10 +50,10 @@
         "portable",
         "zip"
       ],
-      "artifactName": "工位看盘-${version}-绿色解压版-${arch}.${ext}"
+      "artifactName": "${name}-${version}-win-${arch}.${ext}"
     },
     "nsis": {
-      "artifactName": "工位看盘-${version}-安装版-${arch}.${ext}",
+      "artifactName": "${name}-${version}-setup-${arch}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
@@ -61,7 +61,7 @@
       "shortcutName": "工位看盘"
     },
     "portable": {
-      "artifactName": "工位看盘-${version}-绿色单文件.${ext}"
+      "artifactName": "${name}-${version}-portable.${ext}"
     }
   }
 }

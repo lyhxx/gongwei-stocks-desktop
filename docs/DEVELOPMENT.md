@@ -2,15 +2,17 @@
 
 面向二次开发与维护。阅读前建议先跑通 `npm install && npm start && npm test`。
 
+**目录** ：[技术栈](#1-技术栈与约束) · [进程模型](#2-进程与窗口模型) · [数据流](#3-数据流) · [Provider 层](#4-provider-层srccommonprovidersjs) · [IPC 契约](#5-ipc-契约) · [存储 schema](#6-存储-schema) · [渲染层要点](#7-渲染层要点) · [构建与发布](#8-构建与发布) · [测试](#9-测试) · [编码约定](#10-编码约定) · [已知问题](#11-已知问题与决策记录)
+
 ## 1. 技术栈与约束
 
 | 项 | 选择 | 说明 |
 | --- | --- | --- |
 | 运行时 | Electron 33 | 主进程 Node 22 / 渲染进程 Chromium |
-| 持久化 | `electron-store` 8 | 主进程唯一写入口，落盘为 JSON |
+| 持久化 | `electron-store` 8 | 主进程唯一写入口，落盘 JSON |
 | 打包 | `electron-builder` 25 | 一次产出 nsis / portable / zip |
 | 测试 | Node + `jsdom` | 无框架，纯 `assert`，离线可跑 |
-| 目标平台 | 仅 Windows x64 | 浮窗透明置顶、托盘、全局热键均按 Windows 调优 |
+| 目标平台 | 仅 Windows x64 | 浮窗、托盘、热键按 Windows 调优 |
 
 刻意不引入前端框架与打包器：渲染层是原生 ES + CSS，改完直接生效，方便长期单独维护。
 
@@ -77,7 +79,7 @@ setInterval(refreshMarket)            // 间隔取自 settings.main.refreshInter
 | 目标 | 规则 | 示例 |
 | --- | --- | --- |
 | 东财 secid | SH→`1.`，SZ/BJ→`0.`，HK→`116.`，US→`100.` | `1.600000` |
-| 腾讯 / 新浪 | `sh/sz/bj/hk/us` + 代码 | `hk00700`（注意不是 `hkex`） |
+| 腾讯 / 新浪 | `sh/sz/bj/hk/us` + 代码 | `hk00700`（不是 `hkex`） |
 
 搜索结果的 `sourceIds.eastmoney` 优先于推断，添加自选时一并保存，避免北证/港股/美股漂移。
 
@@ -112,23 +114,23 @@ setInterval(refreshMarket)            // 间隔取自 settings.main.refreshInter
 | 桥接方法 | 通道 | 说明 |
 | --- | --- | --- |
 | `getStore()` | `store:get` | 读取完整 store |
-| `getVersion()` | `app:version` | 应用版本号（界面底部展示） |
-| `getMarket()` | `market:get` | 取最近一次行情快照 |
+| `getVersion()` | `app:version` | 应用版本号（界面底部） |
+| `getMarket()` | `market:get` | 取最近行情快照 |
 | `refreshMarket()` | `market:refresh` | 主动刷新 |
 | `search(kw)` | `search` | 五层兜底搜索 |
-| `addStock(item)` / `removeStock(id)` | `stocks:add` / `stocks:remove` | 增删自选 |
+| `addStock` / `removeStock` | `stocks:add` / `stocks:remove` | 增删自选 |
 | `updateAlert(id, alert)` | `stocks:update-alert` | 提醒条件（合并写入） |
 | `updateStock(id, patch)` | `stocks:update` | 通用字段（`badgeEnabled` 等） |
 | `moveStock(id, dir)` | `stocks:move` | 排序，`dir=-1` 上移 |
 | `snoozeStock(id, min)` | `stocks:snooze` | 暂停提醒 |
-| `toggleIndex(id, on)` | `indices:toggle` | **原子**启停指数（前端不算集合，避免连点竞态） |
-| `updateSettings(patch)` | `settings:update` | 设置深合并，含浮窗透明度/宽度/位置 |
-| `toggleFloat()` / `hideFloat()` | `float:toggle` / `float:hide` | 浮窗显隐 |
+| `toggleIndex(id, on)` | `indices:toggle` | **原子**启停指数，避免连点竞态 |
+| `updateSettings(patch)` | `settings:update` | 设置深合并 |
+| `toggleFloat` / `hideFloat` | `float:toggle` / `float:hide` | 浮窗显隐 |
 | `floatResize(h)` | `float:resize` | 浮窗回报内容高度（单向） |
 | `testNotify()` | `notify:test` | 测试通知，返回 `{ok, message}` |
 | `diagnose()` | `diagnose` | 通道状态与报错 |
 | `selftest()` | `selftest` | 九探针并行实测 |
-| `onMarket(cb)` / `onStore(cb)` / `onAlert(cb)` | `market:update` / `store:changed` / `alert:trigger` | 主进程推送 |
+| `onMarket` / `onStore` / `onAlert` | `market:update` / `store:changed` / `alert:trigger` | 主进程推送 |
 
 新增通道时 **preload 与 main 必须同步改**，否则 `test/audit.js` 会报「注册了但未使用 / 调用了但未注册」。
 
@@ -201,31 +203,49 @@ git tag v1.0.0 && git push origin main --tags
 ## 9. 测试
 
 ```bash
-npm test    # = node test/audit.js && node test/providers.test.js && node test/dom.test.js
+npm test
+# = node scripts/validate-build-config.js
+#   && node test/audit.js
+#   && node test/providers.test.js
+#   && node test/dom.test.js
 ```
 
-| 文件 | 覆盖 |
+| 文件 | 侧重 |
 | --- | --- |
-| `test/audit.js` | 静态审计：元素引用是否存在、桥接与 IPC 是否一一对应、指数 id 与中文名映射是否齐全、`hidden` 规则是否完整、是否误开 `nodeIntegration`、README 版本是否同步 |
-| `test/providers.test.js` | 解析（smartbox 转义、GBK、新浪/腾讯行、secid、精度换算）与 mock 联调（三路合并、搜索兜底顺序） |
-| `test/dom.test.js` | jsdom 真跑渲染与交互：卡片、折叠、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗、联想下拉、浮窗 |
+| `scripts/validate-build-config.js` | 打包配置是否符合官方 schema |
+| `test/audit.js` | 引用与桥接一致性等静态检查 |
+| `test/providers.test.js` | 行情 / 搜索解析与降级联调 |
+| `test/dom.test.js` | 主窗口与浮窗的真实渲染交互 |
 
-添加用例的原则：**优先用能复现真实 bug 的输入**。例如测 `\uXXXX` 用 `String.raw`，测 GBK 用真实字节，测 `hidden` 用 `getComputedStyle`（只断言 `element.hidden` 属性会漏掉 CSS 覆盖问题）。
+各文件具体覆盖：
+
+* **`scripts/validate-build-config.js`** — 用 electron-builder 官方 schema 校验 `build` 字段，拦截非法字段（如曾经的 `build.zip`）、重复或含非 ASCII 的产物命名、清单里不存在的资源与图标
+* **`test/audit.js`** — `$('id')` 引用的元素是否存在、桥接方法与 IPC 通道是否一一对应、内置指数 id 与前端中文名映射是否齐全、声明了 `display` 的元素是否有 `[hidden]` 同伴、是否误开 `nodeIntegration`、README 是否链接到文档
+* **`test/providers.test.js`** — smartbox `\uXXXX` 转义、GBK 自动识别、新浪/腾讯行解析、secid 与精度换算，以及 mock fetch 下的三路合并与搜索兜底顺序
+* **`test/dom.test.js`** — jsdom 真跑：卡片渲染、提醒折叠态保持、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗开合、联想下拉、浮窗结构与主题
+
+添加用例的原则：**优先用能复现真实 bug 的输入**。
+
+* 测 `\uXXXX` 转义要用 `String.raw` 还原 wire 数据，直接写 `\u6d66` 会被 JS 提前解析、掩盖 bug
+* 测 GBK 要用真实字节，不能用 UTF-8 字符串
+* 测 `hidden` 要用 `getComputedStyle`，只断言 `element.hidden` 属性会漏掉 CSS 覆盖问题
 
 ## 10. 编码约定
 
-* 不引入 TypeScript / 打包器；CommonJS（主进程）+ 原生 ES（渲染层）。
-* 中文注释，解释「为什么」而不是「是什么」；每个 tricky 处注明踩坑原因。
-* 主进程是**唯一数据写入方**，渲染层只读 store + 发指令。
-* 新增界面元素后跑 `npm test`，静态审计会校验引用与桥接一致性。
+* 不引入 TypeScript / 打包器；CommonJS（主进程）+ 原生 ES（渲染层）
+* 中文注释，解释「为什么」而不是「是什么」；每个易错点注明踩坑原因
+* 主进程是**唯一数据写入方**，渲染层只读 store + 发指令
+* 界面元素或 IPC 有改动后跑 `npm test`，静态审计会校验引用与桥接一致性
+* Markdown 表格单元格保持短句，长说明放到表格外的列表，避免渲染时折行
 
 ## 11. 已知问题与决策记录
 
-| 问题 | 结论 / 处理 |
-| --- | --- |
-| 中证2000（932000）只有东方财富支持 | 保持内置；东财被拦时该指数显示 `--`，其余正常 |
-| 雪球 suggest 需登录 cookie | 保留为兜底通道，返回 `success:false` 时明确报错跳过，不再当「0 条」 |
-| 便携版数据仍写 `%APPDATA%` | 已知，长期计划改为跟随 exe 目录 |
-| 未做代码签名 | 首次运行有 SmartScreen 提示，个人自用可接受 |
-| 浮窗透明区域挡点击 | 已通过渲染后回报内容高度、窗口自适应解决 |
-| 提醒每 5 分钟可能重复触发 | 有意设计：条件持续满足期间按冷却周期提醒，避免一次性错过 |
+* **中证2000（932000）只有东方财富支持** — 保持内置；东财被拦时该指数显示 `--`，其余正常
+* **雪球 suggest 需登录 cookie** — 保留为兜底通道，返回 `success:false` 时明确报错跳过，不再当「0 条」
+* **便携版数据仍写 `%APPDATA%`** — 已知，长期计划改为跟随 exe 目录
+* **未做代码签名** — 首次运行有 SmartScreen 提示，个人自用可接受
+* **浮窗透明区域挡点击** — 已通过渲染后回报内容高度、窗口自适应解决
+* **提醒每 5 分钟可能重复触发** — 有意设计：条件持续满足期间按冷却周期提醒，避免一次性错过
+* **产物文件名必须是 ASCII** — GitHub Release 会抹掉非 ASCII 字符，导致 `-1.0.0-.-x64.exe` 这种废名；`validate-build-config.js` 已加静态拦截
+* **Release 只由 `action-gh-release` 发布** — `npm run dist` 带 `--publish never`，避免 electron-builder 与 action 各发一次导致资产重复、说明被清空
+

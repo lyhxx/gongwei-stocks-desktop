@@ -33,6 +33,14 @@ const names = [
 ].filter(Boolean);
 if (new Set(names).size !== names.length) problems.push('artifactName 存在重复，产物会互相覆盖');
 
+// 4. 产物命名必须是纯 ASCII：GitHub Release 会把中文等非 ASCII 字符抹掉，
+//    出现「-1.0.0-.-x64.exe」这种废名字（产品显示名仍可用中文）
+for (const n of names) {
+  if (/[^\x20-\x7e]/.test(n)) {
+    problems.push(`artifactName 含非 ASCII 字符，GitHub Release 上会被抹掉：${n}`);
+  }
+}
+
 // 4. 打包文件清单里引用的资源必须真实存在
 for (const pattern of (config.files || [])) {
   if (pattern.includes('*')) continue;
