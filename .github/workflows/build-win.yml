@@ -34,9 +34,14 @@ jobs:
       - name: Check artifacts
         shell: pwsh
         run: |
-          $files = Get-ChildItem dist -Include *.exe,*.zip -File
-          $files | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
-          if ($files.Count -lt 3) { throw "产物数量不足（期望 3 个，实际 $($files.Count) 个）" }
+          $files = Get-ChildItem -Path dist -File | Where-Object { $_.Extension -in '.exe', '.zip' }
+          $files | Sort-Object Name | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          $exe = @($files | Where-Object { $_.Extension -eq '.exe' })
+          $zip = @($files | Where-Object { $_.Extension -eq '.zip' })
+          if ($exe.Count -lt 2 -or $zip.Count -lt 1) {
+            throw "artifacts incomplete: exe=$($exe.Count) zip=$($zip.Count), expected >=2 exe and >=1 zip"
+          }
+          "artifacts ok: $($exe.Count) exe + $($zip.Count) zip"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
