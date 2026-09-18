@@ -20,7 +20,8 @@ const store = {
     { id: 's3', code: '510300', name: '沪深300ETF华泰柏瑞', market: 'CN', exchange: 'SH', securityType: 'fund', order: 2, badgeEnabled: true,
       alert: { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: null } },
     { id: 's4', code: '113050', name: '南银转债', market: 'CN', exchange: 'SH', securityType: 'bond', order: 3, badgeEnabled: true,
-      alert: { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: null } },
+      // 暂停态：提醒开着但 snoozedUntil 在未来
+      alert: { enabled: true, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: new Date(Date.now() + 600000).toISOString() } },
   ],
   settings: {
     main: { theme: 'dark', refreshIntervalSeconds: 3, colors: {} },
@@ -50,6 +51,7 @@ let searchMock = [];
 let proxyMock = { mode: 'system', resolved: 'HTTP 代理 127.0.0.1:7897', error: '' };
 let updateMock = { checked: true, hasUpdate: false, current: '1.0.0', latest: '1.0.0', url: '', notes: '', asset: null, error: '', at: Date.now() };
 let reorderCalls = [];
+let indexReorderCalls = [];
 const diagMock = {
   source: 'none',
   errors: [
@@ -78,6 +80,7 @@ window.gongwei = {
   updateStock: async () => ({}),
   moveStock: async () => true,
   reorderStocks: async (ids) => { reorderCalls.push(ids); return ids; },
+  reorderIndices: async (ids) => { indexReorderCalls.push(ids); return ids; },
   snoozeStock: async () => ({}),
   updateSettings: async (patch) => {
     if (patch && patch.network) store.settings.network = { ...store.settings.network, ...patch.network };
@@ -95,14 +98,23 @@ window.gongwei = {
   toggleFloat: async () => true,
   hideFloat: async () => true,
   floatResize: () => {},
-  collapseFloat: async () => true,
-  toggleFloatCollapse: async () => true,
-  onFloatState: (cb) => { listeners.float = cb; },
   checkUpdate: async () => updateMock,
   getUpdateState: async () => updateMock,
   openExternal: async () => true,
   onUpdateState: (cb) => { listeners.update = cb; },
+  onSession: (cb) => { listeners.session = cb; },
+  onOpenSettings: (cb) => { listeners.openSettings = cb; },
   testNotify: async () => ({ ok: true }),
+  testProxy: async () => ({
+    at: Date.now(),
+    elapsedMs: 180,
+    proxy: { mode: 'system', resolved: 'HTTP 代理 127.0.0.1:7897', error: '' },
+    results: [
+      { name: '腾讯', ok: true, ms: 131, detail: '正常' },
+      { name: '东财', ok: false, ms: 126, detail: '请求失败：fetch failed' },
+      { name: '新浪', ok: true, ms: 57, detail: '正常' },
+    ],
+  }),
   diagnose: async () => ({
     source: diagMock.source,
     updatedAt: Date.now(),
@@ -133,8 +145,29 @@ function t(name, fn) {
   }
   try { fn(); report(name); } catch (e) { report(name, e); }
 }
-async function runQueued() {
-  for (const item of queued) {
+// jsdom 不做布局：给一串元素按顺序打上矩形桩，让拖拽的落点计算能真正跑起来
+function stubRows(nodes, itemHeight) {
+  nodes.forEach((n, i) => {
+    const top = i * itemHeight;
+    n.getBoundingClientRect = () => ({
+      top, bottom: top + itemHeight, left: 0, right: 200, width: 200, height: itemHeight, x: 0, y: top,
+    });
+  });
+}
+// 语法糖：querySelector 的短写
+function props(el, sel) { return el.querySelector(sel); }
+
+// 兜底清理：某条拖拽用例中途失败时，别把「拖拽中」状态留给下一条用例
+function cleanupDrag() {
+  for (const id of [1, 2, 5, 6, 9]) {
+    window.dispatchEvent(new window.MouseEvent('pointerup', { bubbles: true, pointerId: id }));
+  }
+  const box = window.document.getElementById('stocks');
+  if (box) box.querySelectorAll('.dragging').forEach((el) => el.classList.remove('dragging'));
+  window.document.body.classList.remove('dragging-active');
+}
+
+async function runQueued() {  for (const item of queued) {
     item.done = true;
     try { await item.fn(); report(item.name); } catch (e) { report(item.name, e); }
   }
@@ -197,7 +230,7 @@ async function runQueued() {
     const txt = d.getElementById('indices').textContent;
     assert.ok(txt.includes('上证指数') && txt.includes('深证成指'));
     assert.strictEqual(d.querySelectorAll('.idx-card').length, 2);
-    const sections = [...d.querySelectorAll('body > section')].map((s) => (s.querySelector('#indices') ? 'idx' : (s.querySelector('#stocks') ? 'stocks' : '?')));
+    const sections = [...d.querySelectorAll('.app-body > section')].map((s) => (s.querySelector('#indices') ? 'idx' : (s.querySelector('#stocks') ? 'stocks' : '?')));
     assert.ok(sections.indexOf('idx') < sections.indexOf('stocks'));
   });
   t('管理面板可开可合（轮询不重绘）', () => {
@@ -389,28 +422,206 @@ async function runQueued() {
     assert.strictEqual(d.getElementById('updateBadge').hidden, true);
   });
 
-  t('拖拽排序：有拖拽把手、无 ↑↓ 按钮，拖动后写回新顺序', async () => {
+  t('自选拖拽：整行可拖、无 ↑↓ 按钮、拖动后写回新顺序', async () => {
+    cleanupDrag();
     const rows = () => [...d.querySelectorAll('#stocks .stock')];
     assert.strictEqual(rows().length, 4);
-    assert.ok(rows()[0].querySelector('.drag-handle'), '每行应有拖拽把手');
+    assert.ok(rows()[0].querySelector('.drag-handle'), '每行保留拖拽把手作为提示');
     const opsText = [...d.querySelectorAll('.stock .ops button')].map((b) => b.textContent);
-    assert.ok(!opsText.some((t) => t.includes('上移') || t.includes('下移')), '旧的上下移按钮应移除：' + opsText.join(','));
+    assert.ok(!opsText.some((x) => x.includes('上移') || x.includes('下移')), '旧的上下移按钮应移除：' + opsText.join(','));
 
+    // jsdom 不做布局，getBoundingClientRect 恒为 0；这里按顺序打上矩形桩，
+    // 才能真正走到落点计算（真实 Chromium 里的表现由拖拽测试台单独验证过）
+    stubRows(rows(), 40);
     reorderCalls = [];
-    const handle = rows()[0].querySelector('.drag-handle');
-    const mk = (type, y) => {
+    const nameEl = props(rows()[0], '.name');
+    const mk = (type, y, target) => {
       const Ctor = typeof window.PointerEvent === 'function' ? window.PointerEvent : window.MouseEvent;
-      return new Ctor(type, { bubbles: true, button: 0, clientY: y, pointerId: 1 });
+      (target || nameEl).dispatchEvent(new Ctor(type, { bubbles: true, button: 0, clientY: y, clientX: 20, pointerId: 1, isPrimary: true, pointerType: "mouse" }));
     };
-    handle.dispatchEvent(mk('pointerdown', 10));
-    assert.ok(rows()[0].classList.contains('dragging'), '按下后进入拖拽态');
-    handle.dispatchEvent(mk('pointermove', 300)); // jsdom 里 getBoundingClientRect 全是 0，会落到末尾
-    handle.dispatchEvent(mk('pointerup', 300));
+    mk('pointerdown', 10);
+    // 按下即高亮（视觉反馈），但还没超过阈值，不算拖拽位移
+    assert.ok(rows()[0].classList.contains('dragging'), '按下后应高亮提示');
+    assert.strictEqual(reorderCalls.length, 0, '未移动不应结算排序');
+    mk('pointermove', 60);
+    assert.strictEqual(d.body.querySelector('.drag-ghost'), null, '不应生成脱离列表的幽灵元素');
+    assert.strictEqual(d.getElementById('stocks').querySelectorAll('.drag-placeholder').length, 0, '不应有占位符');
+
+    mk('pointermove', 200); // 拖到最后一行下方
+    mk('pointerup', 200, nameEl);
     await new Promise((r) => setTimeout(r, 40));
     assert.strictEqual(reorderCalls.length, 1, '松手后应调用一次排序接口');
-    assert.strictEqual(reorderCalls[0][0], 's2', '被拖到末尾的应是原第一行：' + JSON.stringify(reorderCalls[0]));
-    assert.strictEqual(reorderCalls[0][3], 's1');
+    // 注意：reorderCalls 里的数组来自 jsdom realm，原型与本文件不同，
+    // deepStrictEqual 会因此判不等，先转成本 realm 的数组
+    assert.deepStrictEqual([...reorderCalls[0]], ['s2', 's3', 's4', 's1'], '第一行应被拖到末尾');
+    assert.strictEqual(d.getElementById('stocks').querySelectorAll('.stock').length, 4, '行数应保持 4');
     assert.ok(!d.body.classList.contains('dragging-active'), '拖拽结束要清掉全局态');
+
+    // 按在 ⠿ 把手上也必须能拖（把手是最像"可以拖"的地方，不能被排除）
+    // 注意：上一次拖完 renderAll 会重建 DOM，矩形桩要重新打
+    stubRows(rows(), 40);
+    reorderCalls = [];
+    const handle = props(rows()[0], '.drag-handle');
+    mk('pointerdown', 10, handle);
+    mk('pointermove', 60, handle);
+    mk('pointermove', 200, handle);
+    mk('pointerup', 200, handle);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.strictEqual(reorderCalls.length, 1, '按把手也要能拖');
+    assert.deepStrictEqual([...reorderCalls[0]], ['s2', 's3', 's4', 's1'], '按把手拖到末尾');
+
+    // 按在按钮上不应触发拖拽（否则点铃铛会变成排序）
+    reorderCalls = [];
+    const bell = props(rows()[0], '[data-act="bell"]');
+    mk('pointerdown', 10, bell);
+    mk('pointermove', 300, bell);
+    mk('pointerup', 300, bell);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(reorderCalls.length, 0, '按按钮不应触发排序');
+  });
+
+  t('指数卡片也能拖拽排序', async () => {
+    cleanupDrag();
+    const cards = () => [...d.querySelectorAll('#indices [data-drag-id]')];
+    assert.ok(cards().length >= 2, '指数卡片数不足：' + cards().length);
+    stubRows(cards(), 46);
+    const before = cards().map((c) => c.getAttribute('data-drag-id'));
+    indexReorderCalls = [];
+    const first = cards()[0];
+    const mk = (type, y) => new (typeof window.PointerEvent === 'function' ? window.PointerEvent : window.MouseEvent)(
+      type, { bubbles: true, button: 0, clientY: y, clientX: 20, pointerId: 2, isPrimary: true, pointerType: "mouse" },
+    );
+    first.dispatchEvent(mk('pointerdown', 5));
+    first.dispatchEvent(mk('pointermove', 60));
+    first.dispatchEvent(mk('pointermove', 200));
+    first.dispatchEvent(mk('pointerup', 200));
+    await new Promise((r) => setTimeout(r, 40));
+    assert.strictEqual(indexReorderCalls.length, 1, '指数拖拽应调用 reorderIndices');
+    assert.strictEqual(indexReorderCalls[0].length, before.length, '应带上全部指数 id');
+    assert.strictEqual(indexReorderCalls[0][indexReorderCalls[0].length - 1], before[0], '第一张应被拖到末尾');
+  });
+
+  t('铃铛开启/关闭/暂停 图标与颜色可区分', () => {
+    const bells = [...d.querySelectorAll('.icon-btn.bell')];
+    assert.strictEqual(bells.length, 4);
+    // 用 SVG 而不是 emoji：彩色 emoji 不受 CSS color 影响，三种状态会长得一样
+    bells.forEach((b) => assert.ok(b.querySelector('svg'), '铃铛必须是内联 SVG'));
+    const stateOf = (b) => ['on', 'off', 'snooze'].find((c) => b.classList.contains(c));
+    const on = bells[0];     // s1 浦发银行：开启
+    const off = bells[1];    // s2 平安银行：关闭
+    const snooze = bells[3]; // s4 南银转债：暂停
+    assert.strictEqual(stateOf(on), 'on');
+    assert.strictEqual(stateOf(off), 'off');
+    assert.strictEqual(stateOf(snooze), 'snooze');
+    const colorOf = (b) => window.getComputedStyle(b).color;
+    assert.notStrictEqual(colorOf(on), colorOf(off), '开启与关闭颜色应不同');
+    assert.notStrictEqual(colorOf(on), colorOf(snooze), '开启与暂停颜色应不同');
+    // 关闭态用带斜杠的样式，图形本身也不同
+    assert.ok(off.querySelector('svg line'), '关闭态铃铛应带斜杠');
+    assert.ok(!on.querySelector('svg line'), '开启态铃铛不应有斜杠');
+  });
+
+  t('设置页：分组标题、开关样式、代理连通性测试', async () => {
+    d.getElementById('btnOpenSettings').click();
+    const body = d.getElementById('modalBody');
+    // 分组标题
+    const titles = [...body.querySelectorAll('.set-title')].map((x) => x.textContent.trim());
+    assert.deepStrictEqual(titles, ['外观', '行情', '浮窗', '提醒通道', '网络代理'], '应分成五组：' + titles.join(','));
+    // 开关代替原生 checkbox
+    const switches = [...body.querySelectorAll('.switch input[type=checkbox]')];
+    assert.strictEqual(switches.length, 4, '应有 4 个开关（浮窗/通知/声音/仅交易时段）');
+    switches.forEach((s) => assert.ok(s.parentElement.querySelector('.track'), '开关要有可视轨道'));
+
+    // 代理测试：点一下出结果 chip
+    assert.ok(d.getElementById('btnTestProxy'), '代理应有测试按钮');
+    d.getElementById('btnTestProxy').click();
+    await new Promise((r) => setTimeout(r, 40));
+    const box = d.getElementById('proxyTestResult');
+    assert.ok(box.textContent.includes('2/3'), '应显示 2/3 通：' + box.textContent);
+    assert.strictEqual(box.querySelectorAll('.probe-chip').length, 3, '每条通道一个 chip');
+    assert.strictEqual(box.querySelectorAll('.probe-chip.ok').length, 2);
+    assert.strictEqual(box.querySelectorAll('.probe-chip.bad').length, 1);
+    assert.ok(box.textContent.includes('127.0.0.1:7897'), '应显示实际走向');
+    assert.ok(box.className.includes('warn'), '部分不通应标 warn');
+    d.getElementById('modalClose').click();
+  });
+
+  t('非交易时段在状态栏标出来', () => {
+    listeners.market({ ...JSON.parse(JSON.stringify(marketData)), errors: [] });
+    // 交易中：不显示额外的休市字样
+    listeners.session({ phase: 'morning', trading: true, label: '交易中' });
+    assert.ok(!d.getElementById('status').textContent.includes('午间休市'));
+    assert.ok(!d.getElementById('status').textContent.includes('已收盘'));
+    // 午休
+    listeners.session({ phase: 'lunch', trading: false, label: '午间休市' });
+    assert.ok(d.getElementById('status').textContent.includes('午间休市'), d.getElementById('status').textContent);
+    // 已收盘
+    listeners.session({ phase: 'after-close', trading: false, label: '已收盘' });
+    assert.ok(d.getElementById('status').textContent.includes('已收盘'), d.getElementById('status').textContent);
+    // 周末
+    listeners.session({ phase: 'weekend', trading: false, label: '周末休市' });
+    assert.ok(d.getElementById('status').textContent.includes('周末休市'), d.getElementById('status').textContent);
+    listeners.session(null);
+  });
+  t('设置页有「仅交易时段请求」开关', async () => {
+    d.getElementById('btnOpenSettings').click();
+    const sw = d.getElementById('setMarketHours');
+    assert.ok(sw, '应有仅交易时段开关');
+    assert.strictEqual(sw.checked, true, '默认开启');
+    assert.ok(d.getElementById('marketHoursHint').textContent.includes('09:15'), '应有说明文案');
+    d.getElementById('btnSaveSettings').click();
+    await new Promise((r) => setTimeout(r, 30));
+  });
+
+
+
+  t('拖拽健壮性：不接受第二根指针、触摸需从把手起、点击不排序', async () => {
+    cleanupDrag();
+    const rows = () => [...d.querySelectorAll('#stocks .stock')];
+    stubRows(rows(), 40);
+    const mk = (type, y, target, extra) => {
+      const Ctor = typeof window.PointerEvent === 'function' ? window.PointerEvent : window.MouseEvent;
+      const opts = Object.assign({ bubbles: true, button: 0, clientY: y, clientX: 20, pointerId: 1, isPrimary: true }, extra || {});
+      const ev = new Ctor(type, opts);
+      // jsdom 的 MouseEvent 不认 pointerType / isPrimary，手工补上，
+      // 否则「触摸」这个场景根本模拟不出来（测试会假过）
+      for (const k of ['pointerType', 'isPrimary', 'pointerId']) {
+        if (ev[k] !== opts[k]) {
+          try { Object.defineProperty(ev, k, { value: opts[k] }); } catch { /* 忽略 */ }
+        }
+      }
+      (target || rows()[0].querySelector('.name')).dispatchEvent(ev);
+      return ev;
+    };
+
+    // 1) 先按下一行开始拖，再用第二根手指按另一行：不应产生第二个拖拽
+    reorderCalls = [];
+    mk('pointerdown', 10);
+    mk('pointermove', 60);
+    assert.strictEqual(d.querySelectorAll('.stock.dragging').length, 1, '同时只能有一个拖拽中的元素');
+    // 第二根手指（非主指针）按另一行
+    mk('pointerdown', 10, rows()[1].querySelector('.name'), { pointerId: 2, isPrimary: false });
+    assert.strictEqual(d.querySelectorAll('.stock.dragging').length, 1, '第二根指针不应再开一个拖拽');
+    mk('pointerup', 60);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.strictEqual(reorderCalls.length, 1, '只应结算一次排序');
+
+    // 2) 触摸按在名字上不应起拖（触摸只允许从 ⠿ 把手起）
+    stubRows(rows(), 40);
+    reorderCalls = [];
+    mk('pointerdown', 10, rows()[0].querySelector('.name'), { pointerType: 'touch' });
+    mk('pointermove', 60, rows()[0].querySelector('.name'), { pointerType: 'touch' });
+    mk('pointerup', 60, rows()[0].querySelector('.name'), { pointerType: 'touch' });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(reorderCalls.length, 0, '触摸按名字不应触发排序');
+    assert.strictEqual(d.querySelectorAll('.stock.dragging').length, 0);
+
+    // 3) 只是点一下（位移没过阈值）不应排序
+    reorderCalls = [];
+    mk('pointerdown', 10, rows()[0].querySelector('.drag-handle'));
+    mk('pointerup', 11, rows()[0].querySelector('.drag-handle'));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(reorderCalls.length, 0, '点击不应触发排序');
   });
 
   // 所有用例注册完毕后再串行跑异步用例；queue 里若还有剩余说明有用例被漏跑，必须报错
@@ -442,21 +653,28 @@ async function runQueued() {
     assert.ok(fd.querySelectorAll('.idx-grid .idx-card').length >= 1, '指数应为卡片');
     assert.ok(!fd.querySelector('.idx-line'), '旧的行式指数已移除');
   });
-  ft('收起态显示小球、展开态显示内容', () => {
-    const card = fd.querySelector('.card');
-    assert.strictEqual(fd.getElementById('ball').hidden, true, '默认展开，不显示小球');
-    assert.strictEqual(fd.getElementById('expanded').hidden, false);
-    // 模拟主进程下发「已收起」
-    listeners.float({ collapsed: true, edge: 'right' });
-    assert.strictEqual(card.classList.contains('collapsed'), true);
-    assert.strictEqual(fd.getElementById('ball').hidden, false, '收起后显示小球');
-    assert.strictEqual(fd.getElementById('expanded').hidden, true, '收起后隐藏内容');
-    assert.ok(fd.getElementById('ball').textContent.includes('/'), '小球显示涨跌家数：' + fd.getElementById('ball').textContent);
-    assert.ok(fd.getElementById('ball').className.includes('up'), '涨多时小球红色');
-    // 再展开
-    listeners.float({ collapsed: false, edge: 'right' });
-    assert.strictEqual(card.classList.contains('collapsed'), false);
-    assert.strictEqual(fd.getElementById('expanded').hidden, false);
+  ft('浮窗没有左侧蓝条、没有收起小球', () => {
+    assert.strictEqual(fd.getElementById('ball'), null, '小球元素应移除');
+    assert.strictEqual(fd.getElementById('expanded'), null, '展开包裹层已拍平');
+    assert.strictEqual(fd.querySelectorAll('.card').length, 1);
+    // 左侧竖条是 .card::before，JS 侧只能确认样式表里不再定义它
+    const css = fs.readFileSync(path.join(root, 'src', 'float', 'float.css'), 'utf8');
+    assert.ok(!/\.card::before/.test(css), '左侧蓝色竖条样式应删除');
+    assert.ok(!/\.ball\b/.test(css), '小球样式应删除');
+    assert.ok(!/collapsed/.test(css), '收起态样式应删除');
+  });
+  ft('主界面只有一层滚动条、且提醒输入框不撑破网格', () => {
+    const css = fs.readFileSync(path.join(root, 'src', 'renderer', 'styles.css'), 'utf8');
+    // 自选不再自己滚动，滚动统一交给 .app-body，避免展开时出现两条滚动条
+    assert.ok(/\.app-body\s*\{[^}]*overflow-y:\s*auto/.test(css), '.app-body 应是唯一滚动容器');
+    assert.ok(/body\s*\{[^}]*overflow:\s*hidden/s.test(css), '页面本身不应滚动');
+    assert.ok(!/#stocks\s*\{[^}]*overflow-y:\s*auto/.test(css), '#stocks 不应再自己滚动');
+    // Chromium 里标准属性会让 ::-webkit-scrollbar 失效，所以不能出现
+    assert.ok(!/scrollbar-width\s*:/.test(css), '不能写 scrollbar-width，否则自定义滚动条失效');
+    assert.ok(!/scrollbar-color\s*:/.test(css), '不能写 scrollbar-color，否则自定义滚动条失效');
+    assert.ok(/::-webkit-scrollbar\s*\{/.test(css), '应有自定义滚动条样式');
+    assert.ok(/\.alert-grid\s*\{[^}]*minmax\(0,\s*1fr\)/.test(css), 'alert-grid 必须用 minmax(0,1fr) 才能被输入框压缩');
+    assert.ok(/\.alert-grid input\s*\{[^}]*min-width:\s*0/.test(css), 'alert-grid 输入框需 min-width:0');
   });
 
   console.log(`\nDOM: 共 ${passed} 项，${process.exitCode ? '有失败' : '全部通过'}`);

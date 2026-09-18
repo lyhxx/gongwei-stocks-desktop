@@ -1,6 +1,7 @@
 // 工位看盘 - 主窗口逻辑
 let state = null;
 let market = { stockQuotes: [], indexQuotes: [] };
+let session = null; // 交易时段状态（交易中/午休/已收盘/周末/节假日）
 
 const $ = (id) => document.getElementById(id);
 
@@ -42,6 +43,8 @@ async function boot() {
   window.gongwei.onMarket((m) => { market = m; updateMarketUI(); });
   window.gongwei.onStore((s) => { state = s; renderAll(); });
   window.gongwei.onUpdateState((u) => renderUpdateBadge(u));
+  window.gongwei.onSession((s) => { session = s; renderStatus(); });
+  window.gongwei.onOpenSettings(() => openSettings());
   window.gongwei.onAlert((p) => {
     const channels = state.settings.alerts.channels || [];
     if (channels.includes('sound')) beep();
@@ -228,7 +231,10 @@ function renderStatus(text) {
   const t = market.updatedAt ? new Date(market.updatedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
   const nErr = (market.errors || []).length;
   const live = !market.updatedAt ? 'idle' : (nErr ? 'warn' : 'ok');
-  el.innerHTML = `<span class="live-dot ${live}" id="btnStatusDot" role="button" tabindex="0" title="查看诊断"></span>更新 ${t} · ${escapeHtml(market.source || 'none')} · 共${state.stocks.length}只`;
+  // 非交易时段直接标出来，用户就知道"数据不动是正常的"，而不是以为软件坏了
+  const stopped = session && session.label && !session.trading;
+  const sessionText = stopped ? ` · ${escapeHtml(session.label)}` : '';
+  el.innerHTML = `<span class="live-dot ${live}" id="btnStatusDot" role="button" tabindex="0" title="查看诊断"></span>更新 ${t} · ${escapeHtml(market.source || 'none')}${sessionText} · 共${state.stocks.length}只`;
   // 状态灯点击即可看诊断（不再单独放诊断按钮）
   const dot = document.getElementById('btnStatusDot');
   if (dot) {
@@ -315,43 +321,127 @@ function closeModal() {
 }
 function openSettings() {
   openModal('设置', 'settings', `
-    <label>主题 <select id="setTheme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色（摸鱼）</option></select></label>
-    <label>刷新间隔（秒，最小2） <input id="setInterval" type="number" min="2" max="60" step="1" /></label>
-    <label>浮窗透明度 <input id="setOpacity" type="number" min="30" max="100" step="1" /></label>
-    <label><input id="setFloatEnabled" type="checkbox" /> 启用浮窗</label>
-    <label><input id="setEdgeSnap" type="checkbox" /> 浮窗拖到屏幕边缘自动贴边收成小球</label>
-    <label><input id="setNotify" type="checkbox" /> 桌面通知提醒</label>
-    <label><input id="setSound" type="checkbox" /> 声音提醒</label>
-    <div class="settings-group">
-      <label>网络代理 <select id="setProxyMode">
-        <option value="system">跟随系统</option>
-        <option value="direct">不使用</option>
-        <option value="manual">手动指定</option>
-      </select></label>
-      <label id="proxyUrlRow">代理地址 <input id="setProxyUrl" type="text" placeholder="http://127.0.0.1:7890" /></label>
+    <div class="set-group">
+      <div class="set-title">外观</div>
+      <div class="set-row">
+        <span class="set-label">主题</span>
+        <select id="setTheme">
+          <option value="system">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色（摸鱼）</option>
+        </select>
+      </div>
+      <div class="set-row">
+        <span class="set-label">浮窗透明度</span>
+        <span class="set-ctl"><input id="setOpacity" type="number" min="30" max="100" step="1" /><i class="set-unit">%</i></span>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">行情</div>
+      <div class="set-row">
+        <span class="set-label">刷新间隔</span>
+        <span class="set-ctl"><input id="setInterval" type="number" min="2" max="60" step="1" /><i class="set-unit">秒</i></span>
+      </div>
+      <div class="set-row">
+        <span class="set-label">仅交易时段请求</span>
+        <label class="switch"><input id="setMarketHours" type="checkbox" /><span class="track"></span></label>
+      </div>
+      <p class="hint" id="marketHoursHint"></p>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">浮窗</div>
+      <div class="set-row">
+        <span class="set-label">显示浮窗</span>
+        <label class="switch"><input id="setFloatEnabled" type="checkbox" /><span class="track"></span></label>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">提醒通道</div>
+      <div class="set-row">
+        <span class="set-label">桌面通知</span>
+        <label class="switch"><input id="setNotify" type="checkbox" /><span class="track"></span></label>
+      </div>
+      <div class="set-row">
+        <span class="set-label">声音提醒</span>
+        <label class="switch"><input id="setSound" type="checkbox" /><span class="track"></span></label>
+      </div>
+      <div class="set-actions">
+        <button id="btnTestSound">试听声音</button>
+        <button id="btnTestNotify">发条通知</button>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">网络代理</div>
+      <div class="set-row">
+        <span class="set-label">模式</span>
+        <select id="setProxyMode">
+          <option value="system">跟随系统</option>
+          <option value="direct">不使用</option>
+          <option value="manual">手动指定</option>
+        </select>
+      </div>
+      <div class="set-row" id="proxyUrlRow">
+        <span class="set-label">代理地址</span>
+        <input id="setProxyUrl" type="text" placeholder="http://127.0.0.1:7890" />
+      </div>
       <p class="hint" id="proxyHint"></p>
+      <div class="set-actions">
+        <button id="btnTestProxy">测试连通性</button>
+        <span class="test-result" id="proxyTestResult"></span>
+      </div>
     </div>
-    <div class="settings-test">
-      <button id="btnTestSound">测试声音</button>
-      <button id="btnTestNotify">测试通知</button>
-    </div>
-    <button id="btnSaveSettings" class="primary">保存设置</button>`);
+
+    <div class="set-footer">
+      <button id="btnSaveSettings" class="primary">保存设置</button>
+    </div>`);
   fillSettings(true);
   const syncProxyRow = () => {
-    const manual = $('setProxyMode').value === 'manual';
-    $('proxyUrlRow').hidden = !manual;
-    $('proxyHint').textContent = manual
-      ? '填代理软件里的 HTTP / SOCKS5 地址，保存后立即生效'
-      : ($('setProxyMode').value === 'system'
-        ? '自动使用 Windows 系统代理与 PAC，代理软件开启时通常选这个'
+    const mode = $('setProxyMode').value;
+    $('proxyUrlRow').hidden = mode !== 'manual';
+    $('proxyHint').textContent = mode === 'manual'
+      ? '填代理软件里的 HTTP / SOCKS5 地址，例如 127.0.0.1:7890，保存后立即生效'
+      : (mode === 'system'
+        ? '自动使用 Windows 系统代理与 PAC，代理软件开着时一般选这个'
         : '直连，不走任何代理');
   };
-  $('setProxyMode').onchange = syncProxyRow;
+  $('setProxyMode').onchange = () => { syncProxyRow(); $('proxyTestResult').textContent = ''; };
   syncProxyRow();
+  const syncMarketHoursHint = () => {
+    $('marketHoursHint').textContent = $('setMarketHours').checked
+      ? '只在 09:15–11:30、13:00–15:00 请求，收盘后补抓一次最终价；午休/周末/节假日不发请求'
+      : '全天按间隔请求（休市时数据不会变，只是多耗流量）';
+  };
+  $('setMarketHours').onchange = syncMarketHoursHint;
+  syncMarketHoursHint();
   $('btnTestSound').onclick = () => beep();
   $('btnTestNotify').onclick = async () => {
     const r = await window.gongwei.testNotify();
     toast(r && r.ok === false ? (r.message || '通知发送失败') : '通知已发送，看看右下角', 3000);
+  };
+  $('btnTestProxy').onclick = async () => {
+    const btn = $('btnTestProxy');
+    const box = $('proxyTestResult');
+    btn.disabled = true;
+    box.className = 'test-result';
+    box.textContent = '测试中…';
+    try {
+      const r = await window.gongwei.testProxy();
+      const pass = r.results.filter((x) => x.ok).length;
+      const tone = pass === r.results.length ? 'ok' : (pass ? 'warn' : 'bad');
+      box.className = `test-result ${tone}`;
+      box.innerHTML = `<strong>${pass}/${r.results.length} 通</strong>`
+        + r.results.map((x) => `<span class="probe-chip ${x.ok ? 'ok' : 'bad'}" title="${escapeHtml(x.detail)}">${escapeHtml(x.name)} ${x.ok ? x.ms + 'ms' : '✗'}</span>`).join('')
+        + `<em>${escapeHtml(r.proxy.resolved)}</em>`;
+    } catch (e) {
+      box.className = 'test-result bad';
+      box.textContent = `测试失败：${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
   };
   $('btnSaveSettings').onclick = async () => {
     const { proxyError } = await saveSettings();
@@ -423,63 +513,192 @@ async function checkUpdate() {
   else toast(`已是最新版本 v${u.current}`, 2500);
 }
 
-// ---- 拖拽排序 ----
-// 指针事件实现：按住行首 ⠿ 拖动，实时把被拖行插到目标位置，松手后把新顺序写回主进程
+// ---- 拖拽排序（自选列表 + 指数卡片共用）----
+// 要点（都是踩过的坑）：
+//   1. pointermove/up 挂在 window 上，不用 setPointerCapture。
+//      之前挂在被拖元素上，列表一旦重建（名称回填/改设置等 broadcastStore）元素就被换掉，
+//      pointerup 收不到 → dragState 永远卡住 → 之后所有拖拽都失效（"有时拖不动"）。
+//   2. 拖拽期间不重建列表（见 renderStocks 里的 guard），避免拖到一半元素被替换。
+//   3. 同一时刻只允许一个拖拽；只认主指针；触摸必须从 ⠿ 把手起拖。
+//   4. 换位动画用 Web Animations，各自独立可取消，不会互相清 transform。
 let dragState = null;
+const DRAG_THRESHOLD = 4; // 小于这个位移视为点击
+const flipAnims = new WeakMap();
 
-function attachDrag(div, stock) {
-  const handle = div.querySelector('.drag-handle');
-  if (!handle) return;
-  handle.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    dragState = { id: stock.id, div, handle, pointerId: e.pointerId, moved: false };
-    div.classList.add('dragging');
-    document.body.classList.add('dragging-active');
-    try { handle.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
-    handle.addEventListener('pointermove', onDragMove);
-    handle.addEventListener('pointerup', onDragEnd);
-    handle.addEventListener('pointercancel', onDragEnd);
+// 拖拽时不要抢这些元素自己的交互。
+// 注意：不要把 .drag-handle 排除掉，把手反而是最该能拖的地方
+const NO_DRAG_SELECTOR = 'button, input, select, textarea, a, .aconfig';
+
+function dragItemsOf(container) {
+  return [...container.querySelectorAll('[data-drag-id]')];
+}
+
+function isDragging() {
+  return !!dragState;
+}
+
+// 把 dragged 移到 ref 之前，并让因此位移的元素平滑滑过去
+function moveWithFlip(container, dragged, ref) {
+  // 先把还在播的动画收掉：否则 getBoundingClientRect 读到的含动画偏移，
+  // 连点两次会误差叠加，元素看起来乱跳
+  for (const n of container.children) {
+    const a = flipAnims.get(n);
+    if (a) { a.cancel(); flipAnims.delete(n); }
+  }
+
+  const kids = [...container.children];
+  const before = new Map();
+  for (const n of kids) before.set(n, n.getBoundingClientRect()); // 先统一读
+
+  container.insertBefore(dragged, ref);
+
+  for (const n of container.children) {                            // 再统一写
+    const b = before.get(n);
+    if (!b) continue;
+    const a = n.getBoundingClientRect();
+    const dx = b.left - a.left;
+    const dy = b.top - a.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+    if (typeof n.animate === 'function') {
+      flipAnims.set(n, n.animate(
+        [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+        { duration: 140, easing: 'cubic-bezier(.2, .8, .2, 1)' },
+      ));
+    } else {
+      // 退路（jsdom 等没有 Web Animations 的环境）
+      n.style.transition = 'none';
+      n.style.transform = `translate(${dx}px, ${dy}px)`;
+      requestAnimationFrame(() => {
+        n.style.transition = 'transform 140ms ease';
+        n.style.transform = '';
+      });
+    }
+  }
+}
+
+// 拖拽开始时冻结每个槽位的几何。
+// 关键：网格里换位会让整片元素挪动，如果每次都按实时坐标找目标，指针会不断落到
+// 刚换过去的元素附近，形成"换位 → 坐标变 → 再换回"的来回抖动（表现为几个卡片瞬移乱窜）。
+// 用冻结的槽位决策后，同一指针位置永远得出同一结果，天然稳定。
+function captureSlots(container) {
+  return dragItemsOf(container).map((el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      el,
+      cx: r.left + r.width / 2,
+      cy: r.top + r.height / 2,
+      top: r.top,
+      bottom: r.bottom,
+      empty: r.width === 0 && r.height === 0,
+    };
   });
 }
 
-function onDragMove(e) {
-  if (!dragState) return;
-  dragState.moved = true;
-  const box = $('stocks');
-  const others = [...box.querySelectorAll('.stock:not(.dragging)')];
-  const y = e.clientY;
-  let target = null;
-  for (const row of others) {
-    const rect = row.getBoundingClientRect();
-    if (y < rect.top + rect.height / 2) { target = row; break; }
+// 依据冻结槽位算出「插到哪个元素的前/后」
+function resolveTarget(slots, dragged, x, y) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const s of slots) {
+    if (s.el === dragged || s.empty) continue;
+    const d = Math.hypot(x - s.cx, y - s.cy);
+    if (d < bestDist) { bestDist = d; best = s; }
   }
-  // 直接搬 DOM，视觉上跟手；松手后再落库
-  if (target) box.insertBefore(dragState.div, target);
-  else box.appendChild(dragState.div);
+  if (!best) return null;
+  const sameRow = y >= best.top && y <= best.bottom;
+  const before = sameRow ? x < best.cx : y < best.cy;
+  return { el: best.el, before };
 }
 
-function onDragEnd() {
-  if (!dragState) return;
-  const { div, handle, id, moved, pointerId } = dragState;
-  handle.removeEventListener('pointermove', onDragMove);
-  handle.removeEventListener('pointerup', onDragEnd);
-  handle.removeEventListener('pointercancel', onDragEnd);
-  try { handle.releasePointerCapture(pointerId); } catch { /* 忽略 */ }
-  div.classList.remove('dragging');
+function attachDrag(el) {
+  el.addEventListener('pointerdown', onDragStart);
+}
+
+function onDragStart(e) {
+  if (dragState) return;                        // 已有拖拽在进行，忽略新的指针
+  // 只拒绝「明确标记为非主指针」的；缺省视为可用（测试环境只有 MouseEvent）
+  if (e.isPrimary === false) return;
+  if (e.pointerType === 'touch' && !e.target.closest('.drag-handle')) return; // 触摸只允许从把手起拖
+  if (e.button !== 0) return;
+  if (e.target.closest(NO_DRAG_SELECTOR)) return; // 让按钮/输入框照常工作
+  e.preventDefault();
+
+  const el = e.currentTarget;
+  dragState = {
+    el,
+    container: el.parentElement,
+    startX: e.clientX,
+    startY: e.clientY,
+    pointerId: e.pointerId,
+    moved: false,
+    slots: captureSlots(el.parentElement), // 冻结槽位，拖拽期间不再读实时坐标
+    kind: el.classList.contains('idx-card') ? 'index' : 'stock',
+  };
+  el.classList.add('dragging');
+  document.body.classList.add('dragging-active');
+  // 挂在 window 上：元素后续被移动/重建也不影响收尾
+  window.addEventListener('pointermove', onDragMove, true);
+  window.addEventListener('pointerup', onDragEnd, true);
+  window.addEventListener('pointercancel', onDragEnd, true);
+  window.addEventListener('blur', onDragEnd, true);
+  window.addEventListener('keydown', onDragKey, true);
+}
+
+function detachDragListeners() {
+  window.removeEventListener('pointermove', onDragMove, true);
+  window.removeEventListener('pointerup', onDragEnd, true);
+  window.removeEventListener('pointercancel', onDragEnd, true);
+  window.removeEventListener('blur', onDragEnd, true);
+  window.removeEventListener('keydown', onDragKey, true);
+}
+
+function onDragKey(e) {
+  if (e.key === 'Escape') onDragEnd();
+}
+
+function onDragMove(e) {
+  const st = dragState;
+  if (!st) return;
+  if (st.pointerId !== undefined && e.pointerId !== undefined && e.pointerId !== st.pointerId) return;
+  if (!st.moved) {
+    if (Math.hypot(e.clientX - st.startX, e.clientY - st.startY) < DRAG_THRESHOLD) return;
+    st.moved = true;
+  }
+  const target = resolveTarget(st.slots, st.el, e.clientX, e.clientY);
+  if (!target) return;
+  const ref = target.before ? target.el : target.el.nextSibling;
+  if (st.el.nextSibling === ref || st.el === ref) return;   // 已在正确位置
+  moveWithFlip(st.container, st.el, ref);
+}
+
+function onDragEnd(e) {
+  const st = dragState;
+  if (!st) return;
+  if (e && e.pointerId !== undefined && st.pointerId !== undefined && e.pointerId !== st.pointerId) return;
+  detachDragListeners();
+  st.el.classList.remove('dragging');
   document.body.classList.remove('dragging-active');
   dragState = null;
-  if (!moved) return; // 只是点了一下，不算排序
+  if (!st.moved) return; // 只是点了一下，不算排序
 
-  const ids = [...$('stocks').querySelectorAll('.stock')].map((el) => el.getAttribute('data-stock'));
-  window.gongwei.reorderStocks(ids)
+  const ids = dragItemsOf(st.container).map((node) => node.getAttribute('data-drag-id'));
+  const call = st.kind === 'index' ? window.gongwei.reorderIndices(ids) : window.gongwei.reorderStocks(ids);
+  call
     .then(async () => { state = await window.gongwei.getStore(); renderAll(); })
     .catch(async (err) => {
       toast(`排序失败：${err.message}`, 3000);
       state = await window.gongwei.getStore();
       renderAll();
     });
-  void id;
+}
+
+// 价格提醒铃铛：用内联 SVG 而不是 emoji —— 彩色 emoji 不受 CSS color 影响，
+// 开启/关闭/暂停会看起来一模一样。SVG 用 currentColor 才能真正变色。
+const BELL_ON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M12 2.2a5.6 5.6 0 0 0-5.6 5.6v3.3l-1.5 3a1 1 0 0 0 .9 1.45h12.4a1 1 0 0 0 .9-1.45l-1.5-3V7.8A5.6 5.6 0 0 0 12 2.2Z"/><path fill="currentColor" d="M9.7 17.6a2.3 2.3 0 0 0 4.6 0H9.7Z"/></svg>';
+const BELL_OFF = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M12 3.4a4.6 4.6 0 0 0-4.6 4.6v3.2l-1.3 2.6a.8.8 0 0 0 .7 1.2h10.4a.8.8 0 0 0 .7-1.2l-1.3-2.6V8A4.6 4.6 0 0 0 12 3.4Z"/><path fill="none" stroke="currentColor" stroke-width="1.7" d="M10 18.1a2 2 0 0 0 4 0"/><line x1="4.2" y1="4.2" x2="19.8" y2="19.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+
+function bellLabel(a, snoozed) {
+  if (!a.enabled) return '开启价格提醒';
+  return snoozed ? '提醒已暂停，点击恢复' : '关闭价格提醒';
 }
 
 // toast：替代原生 alert，不阻塞、不打断盯盘
@@ -503,6 +722,9 @@ function renderStocks() {
     box.innerHTML = '<div class="empty">还没有自选<br/>上面输入代码 / 名称 / 拼音缩写，回车添加</div>';
     return;
   }
+  // 拖拽进行中绝不动 DOM：否则被拖元素会被替换，指针事件与位置全乱
+  // （数值仍会通过 updateMarketUI 原地刷新，不影响盯盘）
+  if (isDragging()) return;
   // 首屏即时渲染真卡片（名字来自本地，数值填 -- 等行情），不等行情回来
   // 重建前先捞出用户态（展开/未保存输入），重建后还原：任何重建都不丢用户操作
   const prevOpen = new Set();
@@ -528,14 +750,15 @@ function renderStocks() {
     const div = document.createElement('div');
     div.className = 'stock compact';
     div.setAttribute('data-stock', s.id);
+    div.setAttribute('data-drag-id', s.id);
     const tl = typeLabel(s);
     div.innerHTML = `
       <div class="srow">
-        <span class="drag-handle" title="按住拖动排序">⠿</span>
+        <span class="drag-handle" title="按住任意位置拖动可排序">⠿</span>
         <span class="name" title="${escapeHtml(s.code)}">${escapeHtml(s.name)}<small>${escapeHtml(s.code)}</small>${tl ? `<i class="type-badge">${tl}</i>` : ''}</span>
         <span class="price">${fmtQuotePrice(q)}</span>
         <span class="pill ${up ? 'pct-up' : 'pct-down'}">${hasQ ? `${pct >= 0 ? '+' : ''}${fmt(pct)}%` : '--'}</span>
-        <button class="icon-btn bell ${!a.enabled ? 'off' : (snoozed ? 'snooze' : 'on')}" data-act="bell" title="${!a.enabled ? '开启价格提醒' : (snoozed ? '提醒已暂停，点击恢复' : '关闭价格提醒')}">🔔</button>
+        <button class="icon-btn bell ${!a.enabled ? 'off' : (snoozed ? 'snooze' : 'on')}" data-act="bell" title="${bellLabel(a, snoozed)}">${!a.enabled ? BELL_OFF : BELL_ON}</button>
         <button class="icon-btn chev" data-act="chev" title="展开条件设置">›</button>
       </div>
       <div class="aconfig" ${a.enabled ? '' : 'hidden'}>
@@ -575,7 +798,7 @@ function renderStocks() {
       ops.appendChild(b);
       return b;
     };
-    attachDrag(div, s);
+    attachDrag(div);
     mkBtn('保存条件', async () => {
       const patch = {};
       div.querySelectorAll('input[data-k]').forEach((inp) => {
@@ -630,6 +853,7 @@ function indexName(id, meta) {
 
 function renderIndices() {
   const box = $('indices');
+  if (isDragging()) return; // 同上：拖拽指数卡片时不要重建
   box.innerHTML = '';
   const meta = new Map((market.indexMeta || []).map((m) => [m.stockId, m]));
   const byId = new Map((market.indexQuotes || []).map((q) => [q.stockId, q]));
@@ -648,11 +872,14 @@ function renderIndices() {
     const card = document.createElement('div');
     card.className = 'idx-card';
     card.setAttribute('data-index', stockId);
+    card.setAttribute('data-drag-id', id);
+    card.title = '按住拖动可调整指数顺序';
     card.innerHTML = `<div class="idx-name">${escapeHtml(name)}</div>
       <div class="idx-price">${ok ? fmt(q.latestPrice) : '--'}</div>
       <div class="idx-chg">${ok
         ? `<span>${chg >= 0 ? '+' : ''}${fmt(chg)}</span><i>|</i><span class="${up ? 'pct-up' : 'pct-down'}">${pct >= 0 ? '+' : ''}${fmt(pct)}%</span>`
         : '<span>--</span>'}</div>`;
+    attachDrag(card);
     box.appendChild(card);
   }
   if (!ids.length) {
@@ -743,7 +970,7 @@ function fillSettings(force) {
   $('setInterval').value = state.settings.main.refreshIntervalSeconds;
   $('setOpacity').value = state.settings.floating.opacity;
   $('setFloatEnabled').checked = !!state.settings.floating.enabled;
-  if ($('setEdgeSnap')) $('setEdgeSnap').checked = state.settings.floating.edgeSnap !== false;
+  if ($('setMarketHours')) $('setMarketHours').checked = state.settings.main.marketHoursOnly !== false;
   $('setNotify').checked = (state.settings.alerts.channels || []).includes('notify');
   $('setSound').checked = (state.settings.alerts.channels || []).includes('sound');
   const net = state.settings.network || {};
@@ -756,11 +983,14 @@ async function saveSettings() {
   if ($('setNotify').checked) channels.push('notify');
   if ($('setSound').checked) channels.push('sound');
   await window.gongwei.updateSettings({
-    main: { theme: $('setTheme').value || 'system', refreshIntervalSeconds: Math.max(2, Number($('setInterval').value) || 3) },
+    main: {
+      theme: $('setTheme').value || 'system',
+      refreshIntervalSeconds: Math.max(2, Number($('setInterval').value) || 3),
+      marketHoursOnly: $('setMarketHours') ? $('setMarketHours').checked : true,
+    },
     floating: {
       opacity: Number($('setOpacity').value) || 88,
       enabled: $('setFloatEnabled').checked,
-      edgeSnap: $('setEdgeSnap') ? $('setEdgeSnap').checked : true,
     },
     alerts: { channels },
     network: {

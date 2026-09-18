@@ -24,6 +24,8 @@ function defaultSettings() {
     main: {
       theme: 'system',
       refreshIntervalSeconds: 3,
+      // 只在 A 股交易时段请求：收盘/午休/周末/节假日不打接口，收盘后补一次快照
+      marketHoursOnly: true,
       colors: { up: '#d92d20', down: '#079455' },
     },
     alerts: {
@@ -43,8 +45,6 @@ function defaultSettings() {
       position: 'bottom-right',
       hotkey: 'Ctrl+Shift+M',
       escapeToHideEnabled: true,
-      // 贴边吸附：拖到屏幕边缘自动贴边，左右两侧会收起成小球，鼠标移入展开
-      edgeSnap: true,
     },
     network: {
       // system=跟随系统代理（默认，能自动吃到代理软件/PAC）；direct=直连；manual=手动填地址

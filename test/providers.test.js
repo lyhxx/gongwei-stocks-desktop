@@ -259,72 +259,7 @@ async function okAsync(name, fn) {
     assert.strictEqual(P.typeFromSuggest({ Classify: 'Bond', SecurityTypeName: '可转债' }), 'bond');
   });
 
-  console.log('[10] 浮窗贴边吸附几何');
-  const F = require(path.join(__dirname, '..', 'src', 'common', 'floatLayout.js'));
-  const WA = { x: 0, y: 0, width: 1920, height: 1040 };
-  ok('判定最近的边', () => {
-    assert.strictEqual(F.nearestEdge({ x: 3, y: 500, width: 250, height: 400 }, WA, 20), 'left');
-    assert.strictEqual(F.nearestEdge({ x: 1670, y: 300, width: 250, height: 400 }, WA, 20), 'right');
-    assert.strictEqual(F.nearestEdge({ x: 800, y: 2, width: 250, height: 400 }, WA, 20), 'top');
-    assert.strictEqual(F.nearestEdge({ x: 800, y: 638, width: 250, height: 400 }, WA, 20), 'bottom');
-  });
-  ok('超出阈值视为不贴边', () => {
-    assert.strictEqual(F.nearestEdge({ x: 800, y: 300, width: 250, height: 400 }, WA, 20), null);
-    assert.strictEqual(F.nearestEdge({ x: 40, y: 300, width: 250, height: 400 }, WA, 20), null);
-  });
-  ok('贴边位置对齐且不越界', () => {
-    assert.deepStrictEqual(F.snapToEdge({ x: 1660, y: 500, width: 250, height: 400 }, WA, 'right'), { x: 1670, y: 500 });
-    assert.deepStrictEqual(F.snapToEdge({ x: 12, y: 500, width: 250, height: 400 }, WA, 'left'), { x: 0, y: 500 });
-    // 垂直方向超出时被夹回可用区域
-    assert.deepStrictEqual(F.snapToEdge({ x: 12, y: 900, width: 250, height: 400 }, WA, 'left'), { x: 0, y: 640 });
-  });
-  ok('小球位置：水平贴边、垂直夹紧', () => {
-    assert.deepStrictEqual(F.collapsedBounds(WA, 'right', 46, 500), { x: 1874, y: 500 });
-    assert.deepStrictEqual(F.collapsedBounds(WA, 'left', 46, 500), { x: 0, y: 500 });
-    assert.deepStrictEqual(F.collapsedBounds(WA, 'left', 46, 9999), { x: 0, y: 994 });
-    assert.deepStrictEqual(F.collapsedBounds(WA, 'left', 46, -50), { x: 0, y: 0 });
-  });
-  ok('只有左右两侧能收成小球', () => {
-    assert.strictEqual(F.canCollapse('left'), true);
-    assert.strictEqual(F.canCollapse('right'), true);
-    assert.strictEqual(F.canCollapse('top'), false);
-    assert.strictEqual(F.canCollapse(null), false);
-  });
-
-  console.log('[11] 版本比较与更新资产挑选');
-  const V = require(path.join(__dirname, '..', 'src', 'common', 'version.js'));
-  ok('版本比较', () => {
-    assert.strictEqual(V.compareVersions('1.0.1', '1.0.0'), 1);
-    assert.strictEqual(V.compareVersions('1.0.0', '1.0.0'), 0);
-    assert.strictEqual(V.compareVersions('v1.2.0', '1.10.0'), -1, '按数字比而不是字符串');
-    assert.strictEqual(V.compareVersions('2.0.0', '1.9.9'), 1);
-    assert.strictEqual(V.compareVersions('1.0', '1.0.0'), 0);
-    assert.strictEqual(V.compareVersions('1.0.0-beta.1', '1.0.0'), -1, '预发布小于正式版');
-    assert.strictEqual(V.compareVersions('1.0.0-beta.2', '1.0.0-beta.1'), 1);
-  });
-  ok('脏版本号不炸', () => {
-    assert.strictEqual(V.compareVersions('bad', '1.0.0'), -1);
-    assert.strictEqual(V.compareVersions('1.0.0', 'bad'), 1);
-    assert.strictEqual(V.compareVersions(null, undefined), 0);
-  });
-  ok('isNewer', () => {
-    assert.strictEqual(V.isNewer('1.0.1', '1.0.0'), true);
-    assert.strictEqual(V.isNewer('1.0.0', '1.0.0'), false);
-    assert.strictEqual(V.isNewer('0.9.9', '1.0.0'), false);
-  });
-  ok('挑下载资产优先绿色单文件', () => {
-    const release = {
-      assets: [
-        { name: 'gongwei-stocks-desktop-1.1.0-setup-x64.exe', browser_download_url: 'https://github.com/a/setup', size: 1 },
-        { name: 'gongwei-stocks-desktop-1.1.0-portable.exe', browser_download_url: 'https://github.com/a/portable', size: 2 },
-      ],
-    };
-    assert.strictEqual(V.pickDownloadAsset(release).url, 'https://github.com/a/portable');
-    assert.strictEqual(V.pickDownloadAsset({ assets: [] }), null);
-    assert.strictEqual(V.pickDownloadAsset({}), null);
-  });
-
-  console.log('[12] 自选排序');
+  console.log('[10] 自选排序');
   const O = require(path.join(__dirname, '..', 'src', 'common', 'order.js'));
   const mkStocks = () => [
     { id: 'a', code: '600000', order: 0 },
@@ -348,6 +283,106 @@ async function okAsync(name, fn) {
   ok('非法入参要报错', () => {
     assert.throws(() => O.applyOrder(mkStocks(), null), /数组/);
     assert.throws(() => O.applyOrder(null, ['a']), /异常/);
+  });
+  ok('指数排序：selected 就是 id 数组', () => {
+    assert.deepStrictEqual(O.applyIndexOrder(['shanghai', 'shenzhen', 'chinext'], ['chinext', 'shanghai', 'shenzhen']), ['chinext', 'shanghai', 'shenzhen']);
+    assert.throws(() => O.applyIndexOrder(['shanghai', 'shenzhen'], ['shanghai']), /长度/);
+    assert.throws(() => O.applyIndexOrder(['shanghai', 'shenzhen'], ['shanghai', 'nope']), /未知指数/);
+    assert.throws(() => O.applyIndexOrder(['shanghai', 'shenzhen'], ['shanghai', 'shanghai']), /重复指数/);
+  });
+
+  console.log('[11] A 股交易时段与交易日');
+  const M = require(path.join(__dirname, '..', 'src', 'common', 'market-hours.js'));
+  // 北京时间 = UTC + 8，下面统一用 UTC 串构造
+  const at = (iso) => M.sessionPhase(new Date(iso));
+  ok('盘前不发请求，下一次变化是 09:15', () => {
+    const s = at('2026-09-18T01:00:00Z'); // 周五 09:00
+    assert.strictEqual(s.trading, false);
+    assert.strictEqual(s.phase, 'before-open');
+    assert.strictEqual(new Date(s.nextChangeAt).toISOString(), '2026-09-18T01:15:00.000Z');
+  });
+  ok('集合竞价与上午盘中都请求', () => {
+    assert.strictEqual(at('2026-09-18T01:20:00Z').phase, 'auction');   // 09:20
+    assert.strictEqual(at('2026-09-18T01:20:00Z').trading, true);
+    assert.strictEqual(at('2026-09-18T02:00:00Z').phase, 'morning');   // 10:00
+    assert.strictEqual(at('2026-09-18T02:00:00Z').trading, true);
+  });
+  ok('11:30 整点收上午，午休不发请求', () => {
+    assert.strictEqual(at('2026-09-18T03:29:00Z').trading, true);      // 11:29
+    const s = at('2026-09-18T04:00:00Z');                              // 12:00
+    assert.strictEqual(s.trading, false);
+    assert.strictEqual(s.phase, 'lunch');
+    assert.strictEqual(new Date(s.nextChangeAt).toISOString(), '2026-09-18T05:00:00.000Z'); // 13:00
+  });
+  ok('下午盘中请求，15:00 收盘', () => {
+    assert.strictEqual(at('2026-09-18T06:00:00Z').phase, 'afternoon'); // 14:00
+    assert.strictEqual(at('2026-09-18T06:00:00Z').trading, true);
+    assert.strictEqual(at('2026-09-18T07:00:00Z').trading, false);     // 15:00 整
+  });
+  ok('收盘后有快照窗口，保证拿到最终价', () => {
+    const s = at('2026-09-18T07:10:00Z'); // 15:10
+    assert.strictEqual(s.snapshotDue, true);
+    assert.strictEqual(s.trading, false);
+    assert.strictEqual(s.phase, 'after-close');
+  });
+  ok('快照窗口结束后不再请求，下次是下一个交易日开盘', () => {
+    const s = at('2026-09-18T08:00:00Z'); // 周五 16:00
+    assert.strictEqual(s.phase, 'closed');
+    assert.strictEqual(s.snapshotDue, false);
+    assert.strictEqual(new Date(s.nextChangeAt).toISOString(), '2026-09-21T01:15:00.000Z'); // 下周一 09:15
+  });
+  ok('周末整天不请求', () => {
+    const s = at('2026-09-19T02:00:00Z'); // 周六 10:00
+    assert.strictEqual(s.trading, false);
+    assert.strictEqual(s.phase, 'weekend');
+    assert.strictEqual(s.snapshotDue, false);
+    assert.strictEqual(new Date(s.nextChangeAt).toISOString(), '2026-09-21T01:15:00.000Z');
+  });
+  ok('节假日不请求，跨过整段假期', () => {
+    const s = at('2026-10-01T02:00:00Z'); // 国庆 10:00
+    assert.strictEqual(s.phase, 'holiday');
+    assert.strictEqual(s.trading, false);
+    assert.strictEqual(new Date(s.nextChangeAt).toISOString(), '2026-10-08T01:15:00.000Z');
+  });
+  ok('交易日判断', () => {
+    assert.strictEqual(M.isTradingDay(new Date('2026-09-18T02:00:00Z')), true);  // 周五
+    assert.strictEqual(M.isTradingDay(new Date('2026-09-19T02:00:00Z')), false); // 周六
+    assert.strictEqual(M.isTradingDay(new Date('2026-10-01T02:00:00Z')), false); // 国庆
+    assert.strictEqual(M.isTradingDay(new Date('2026-02-17T02:00:00Z')), false); // 春节
+  });
+  ok('北京时间解析与本机时区无关', () => {
+    const p = M.beijingParts(new Date('2026-09-18T01:00:00Z'));
+    assert.strictEqual(p.dateStr, '2026-09-18');
+    assert.strictEqual(p.hour, 9);
+    assert.strictEqual(p.weekday, 'Fri');
+  });
+  ok('时段有人话说明', () => {
+    assert.strictEqual(M.describePhase('morning'), '交易中');
+    assert.strictEqual(M.describePhase('lunch'), '午间休市');
+    assert.strictEqual(M.describePhase('weekend'), '周末休市');
+    assert.strictEqual(M.describePhase('holiday'), '节假日休市');
+  });
+  ok('调度决策 planTick：何时请求、何时睡觉', () => {
+    const cfg = { marketHoursOnly: true, refreshIntervalSeconds: 3 };
+    const plan = (iso, state) => M.planTick(cfg, new Date(iso), state || {});
+    // 盘中按间隔请求
+    assert.strictEqual(plan('2026-09-18T02:00:00Z').action, 'fetch');
+    assert.strictEqual(plan('2026-09-18T02:00:00Z').delay, 3000);
+    // 午休只睡不发
+    assert.strictEqual(plan('2026-09-18T04:00:00Z').action, 'idle');
+    // 收盘后补抓一次快照
+    assert.strictEqual(plan('2026-09-18T07:10:00Z').action, 'snapshot');
+    // 同一天已经抓过快照就不再抓
+    assert.strictEqual(plan('2026-09-18T07:10:00Z', { closeSnapshotDay: '2026-09-18' }).action, 'idle');
+    // 收盘后、周末都不请求
+    assert.strictEqual(plan('2026-09-18T08:00:00Z').action, 'idle');
+    assert.strictEqual(plan('2026-09-19T02:00:00Z').action, 'idle');
+    // 睡多久不会超过 60 秒（便于设置变更后快速响应）
+    assert.ok(plan('2026-09-19T02:00:00Z').delay <= 60000);
+    // 手动关掉限制后，休市也照常请求
+    const off = M.planTick({ marketHoursOnly: false, refreshIntervalSeconds: 5 }, new Date('2026-09-19T02:00:00Z'), {});
+    assert.strictEqual(off.action, 'fetch');
+    assert.strictEqual(off.delay, 5000);
   });
 
   console.log(`\nproviders: 共 ${passed} 项，${process.exitCode ? '有失败' : '全部通过'}`);

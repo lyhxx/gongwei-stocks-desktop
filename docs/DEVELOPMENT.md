@@ -48,14 +48,29 @@
 | --- | --- |
 | `common/http.js` | 统一请求出口，可注入实现，带超时 |
 | `common/proxy.js` | 代理模式兜底、手工代理地址校验、`resolveProxy` 结果转人话 |
+| `common/market-hours.js` | 交易时段 / 交易日判断，以及「这次 tick 做什么」的调度决策 |
 | `common/version.js` | 版本号解析比较、从 Release 里挑下载资产 |
-| `common/order.js` | 自选排序校验与重排（拖拽落库前调用） |
-| `common/floatLayout.js` | 浮窗贴边吸附的几何计算（最近边、贴边坐标、小球坐标） |
+| `common/order.js` | 自选与指数排序校验（拖拽落库前调用） |
 
-### 3.1 行情轮询
+### 3.1 行情调度
 
 ```
-setInterval(refreshMarket)            // 间隔取自 settings.main.refreshIntervalSeconds，最小 2s
+scheduleTick → tick()
+  └─ planTick(cfg, now, { closeSnapshotDay })     // 纯函数，见 market-hours.js
+       ├─ action=fetch    → refreshMarket('auto')     // 交易时段内，按设定间隔
+       ├─ action=snapshot → refreshMarket('close')    // 15:00~15:30 补抓当日最终价（当天一次）
+       └─ action=idle     → 不发请求，睡到下一个状态变化
+```
+
+* 调度用 `setTimeout` 链而非 `setInterval`，睡多久由 `planTick` 决定，且**上限 60 秒**——休市期间每 60 秒只醒来判断一次状态（不发网络请求），这样改设置或系统时间变化能快速生效。
+* 交易时段与交易日一律按**北京时间**判断（`Intl.DateTimeFormat` + `timeZone: 'Asia/Shanghai'`），与本机时区无关。
+* 法定节假日表在 `market-hours.js` 的 `CN_HOLIDAYS`，每年官方安排公布后更新该处即可；多列几天只是少发几个请求，漏列只是多发几个请求（数据本身不变），不会漏数据。
+* 冷启动会先 `refreshMarket('init')` 拉一次，保证已收盘时界面也有上一笔收盘价。
+
+### 3.2 行情取数
+
+```
+refreshMarket(reason)
   └─ doRefreshMarket(gen++)
        ├─ 组装 stocks + 勾选的 indexStocks
        ├─ 三路并行：fetchEastmoney / fetchSina / fetchTencent
@@ -72,7 +87,7 @@ setInterval(refreshMarket)            // 间隔取自 settings.main.refreshInter
 * `mergeQuoteRows` 按 `stockId` 逐只取第一个 `ok` 的结果，所以来源可能是 `eastmoney+tencent` 混合。
 * 合并结果与 `indexMeta` 一起放进 `lastQuotes`，通过 `market:update` 推给两个窗口。
 
-### 3.2 搜索
+### 3.3 搜索
 
 五层兜底，任一层有结果即返回：
 
@@ -183,9 +198,16 @@ setInterval(refreshMarket)            // 间隔取自 settings.main.refreshInter
 * **管理面板不跟随轮询重绘**：只在打开和勾选时手动画，否则复选框每几秒重建，点不动。
 * **`hidden` 必须真的不显示**：`.foo { display: grid }` 会盖掉浏览器默认的 `[hidden]`，所以 `styles.css` 里有全局 `[hidden] { display: none !important }`，并且每个声明了 `display` 又用 `hidden` 控制的类都补了 `.foo[hidden]`；`test/audit.js` 会静态检查这一点。
 * **弹窗**：设置 / 自检 / 诊断 / 更新共用一个 `#modalOverlay`，`openModal(title, bodyClass, html)` 渲染，遮罩点击、`✕`、`Esc` 均可关闭。
-* **拖拽排序**：指针事件 + `setPointerCapture`，拖动过程中直接搬 DOM（跟手），松手后把新的 id 顺序交给 `stocks:reorder` 校验落库；`getBoundingClientRect` 在 jsdom 里恒为 0，测试里表现为「拖到末尾」。
-* **浮窗两种形态**：展开（`#expanded`）与收起小球（`#ball`），由主进程 `float:state` 事件驱动切 class；小球形态下不做高度自适应，也不渲染列表内容。
+* **拖拽排序**：`attachDrag()` 一套逻辑同时服务自选列表与指数网格。四个坑都踩过，改这段务必留意：
+  1. `pointermove/up` 必须挂 **`window`**（捕获阶段），不要挂被拖元素、也不要用 `setPointerCapture`。列表随时可能被 store 变化重建，挂在元素上的监听会随之失效，`pointerup` 收不到就会让 `dragState` 永久卡住，之后所有拖拽都失效。
+  2. 拖拽期间在 `renderStocks` / `renderIndices` 开头 `if (isDragging()) return`，绝不重建列表。
+  3. 落点判定用**拖拽开始时冻结的槽位坐标**（`captureSlots` + `resolveTarget`），不能每帧读实时坐标：网格里换位会让整片元素挪动，指针会不断落到刚换过去的元素附近，形成「换位 → 坐标变 → 再换回」的来回抖动。
+  4. 换位动画用 `element.animate()`，并在重排前统一 `cancel()` 掉容器内所有在播动画后再测量坐标，避免动画偏移被叠加进下一次测量。
+  另外：同一时刻只允许一个拖拽、只认主指针（`isPrimary === false` 才拒绝，缺省放行以便测试环境只有 `MouseEvent`）、触摸必须从 `.drag-handle` 起拖（触摸事件的 `button` 也是 0，光靠 button 判断拦不住）。
 * **请求一律走 `common/http.js`**：`test/audit.js` 会拦截 `providers.js` 里的裸 `fetch(`，否则换成 `net.fetch` 后代理就不生效了。
+* **主题要同时改原生层**：只改 CSS 变量的话，Windows 标题栏不会变。`applyNativeTheme()` 设置 `nativeTheme.themeSource`，并只给**有系统边框的主窗口**刷 `backgroundColor`——透明浮窗一旦被设成不透明底色，透明区会被填实、圆角外露出直角（`test/audit.js` 有静态检查）。
+* **浮窗先定尺寸再显示**：`show: false` 创建，等渲染层回报内容高度、尺寸设好后再 `showInactive()`，否则会先出现再跳一下；另有 800ms 兜底防止渲染异常时窗口不可见。
+* **浮窗右键菜单**：拦截 `floatWin.webContents` 的 `context-menu` 事件，弹出自己的菜单（刷新 / 显示主窗口 / 设置 / 隐藏 / 停用 / 退出）。
 
 ## 8. 构建与发布
 
@@ -237,14 +259,16 @@ npm test
 
 * **`scripts/validate-build-config.js`** — 用 electron-builder 官方 schema 校验 `build` 字段，拦截非法字段（如曾经的 `build.zip`）、重复或含非 ASCII 的产物命名、清单里不存在的资源与图标
 * **`test/audit.js`** — `$('id')` 引用的元素是否存在、桥接方法与 IPC 通道是否一一对应、内置指数 id 与前端中文名映射是否齐全、声明了 `display` 的元素是否有 `[hidden]` 同伴、是否误开 `nodeIntegration`、README 是否链接到文档
-* **`test/providers.test.js`** — smartbox `\uXXXX` 转义、GBK 自动识别、新浪/腾讯行解析、secid 与精度换算，以及 mock fetch 下的三路合并与搜索兜底顺序
-* **`test/dom.test.js`** — jsdom 真跑：卡片渲染、提醒折叠态保持、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗开合、联想下拉、浮窗结构与主题
+* **`test/providers.test.js`** — smartbox `\uXXXX` 转义、GBK 自动识别、新浪/腾讯行解析、secid 与精度换算、品种归类（股票/基金/可转债）、版本比较，以及 mock fetch 下的三路合并、搜索兜底顺序、交易时段与调度决策
+* **`test/dom.test.js`** — jsdom 真跑：卡片渲染、提醒折叠态保持、铃铛三态、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗开合、设置页分组与开关、联想下拉、拖拽（含多指针与触摸场景）、状态栏休市文案、浮窗
 
 添加用例的原则：**优先用能复现真实 bug 的输入**。
 
 * 测 `\uXXXX` 转义要用 `String.raw` 还原 wire 数据，直接写 `\u6d66` 会被 JS 提前解析、掩盖 bug
 * 测 GBK 要用真实字节，不能用 UTF-8 字符串
 * 测 `hidden` 要用 `getComputedStyle`，只断言 `element.hidden` 属性会漏掉 CSS 覆盖问题
+* 测触摸/多指针要手工补 `pointerType` / `isPrimary`：jsdom 没有 `PointerEvent`，回退到 `MouseEvent` 后这两个字段不会生效，不补就会**假过**
+* 拖拽用例末尾统一 `cleanupDrag()`，避免一条失败把「拖拽中」状态留给后面的用例
 
 ## 10. 编码约定
 
@@ -263,6 +287,8 @@ npm test
 * **浮窗透明区域挡点击** — 已通过渲染后回报内容高度、窗口自适应解决
 * **提醒每 5 分钟可能重复触发** — 有意设计：条件持续满足期间按冷却周期提醒，避免一次性错过
 * **产物文件名必须是 ASCII** — GitHub Release 会抹掉非 ASCII 字符，导致 `-1.0.0-.-x64.exe` 这种废名；`validate-build-config.js` 已加静态拦截
+* **节假日表需要逐年维护** — `CN_HOLIDAYS` 目前覆盖 2025–2026；漏列只会多发几个请求，不会漏数据
+* **指数在非交易日仍显示上一交易日收盘价** — 属预期行为，状态栏会标注「周末休市 / 节假日休市」
 * **Release 只由 `action-gh-release` 发布** — `npm run dist` 带 `--publish never`，避免 electron-builder 与 action 各发一次导致资产重复、说明被清空
 * **不要引入 `undici` 做代理** — Electron 33 内置 Node 20.18，`require('undici')`（6.28+）直接抛 `webidl.util.markAsUncloneable is not a function`；ProxyAgent 也不能跨版本喂给全局 fetch。用 `net.fetch` + `session.setProxy`
 * **浮窗收起/展开靠程序化 `setContentSize`** — `resizable:false` 的无边框透明窗口在 Windows 上仍可被程序缩放（已实测 46×46 ↔ 250×360）

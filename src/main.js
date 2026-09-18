@@ -1,15 +1,15 @@
 // 工位看盘 - 主进程
-const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, globalShortcut, screen, nativeImage, net, session, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, globalShortcut, screen, nativeImage, net, session, shell, nativeTheme } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
 const { INDICES, defaultState } = require('./common/defaults');
-const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest, classifyCode } = require('./common/providers');
+const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest, classifyCode, connectivityTest } = require('./common/providers');
 const { setFetchImpl } = require('./common/http');
 const { fetchWithTimeout } = require('./common/http');
 const { normalizeProxyMode, normalizeProxyRules, describeResolvedProxy } = require('./common/proxy');
-const { nearestEdge, snapToEdge, collapsedBounds, canCollapse } = require('./common/floatLayout');
 const { isNewer, pickDownloadAsset } = require('./common/version');
-const { applyOrder } = require('./common/order');
+const { describePhase, planTick } = require('./common/market-hours');
+const { applyOrder, applyIndexOrder } = require('./common/order');
 
 const store = new Store({ name: 'gongwei-stocks', defaults: defaultState() });
 ensureDefaults();
@@ -18,7 +18,6 @@ let mainWin = null;
 let floatWin = null;
 let tray = null;
 let lastQuotes = { stockQuotes: [], indexQuotes: [], indexMeta: [], updatedAt: null, source: 'none', errors: [] };
-let pollTimer = null;
 let badgeRotateTimer = null;
 let badgeIndex = 0;
 let stockSeq = 0;
@@ -26,6 +25,33 @@ const alertCooldown = new Map(); // stockId -> 上次提醒时间戳
 
 function getState() {
   return store.store;
+}
+
+// ---------- 主题 ----------
+// 界面里的深浅色只影响网页内部，Windows 的原生标题栏需要靠 nativeTheme 才会跟着变；
+// 同时把窗口底色也同步，避免切主题时先闪一下白底
+function effectiveTheme() {
+  const t = (getState().settings.main && getState().settings.main.theme) || 'system';
+  if (t === 'dark' || t === 'light') return t;
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+}
+
+function themeBackground(theme) {
+  return theme === 'dark' ? '#0f141b' : '#f1f5f9';
+}
+
+// 只给「有系统边框的主窗口」刷底色。
+// 浮窗是 transparent 窗口，一旦被设成不透明底色，透明区就会被填实，
+// Windows 会给它画一圈直角阴影，圆角外面就会露出直角（曾踩过）
+function syncWindowBackground() {
+  const bg = themeBackground(effectiveTheme());
+  if (mainWin && !mainWin.isDestroyed()) mainWin.setBackgroundColor(bg);
+}
+
+function applyNativeTheme() {
+  const t = (getState().settings.main && getState().settings.main.theme) || 'system';
+  nativeTheme.themeSource = t === 'dark' ? 'dark' : (t === 'light' ? 'light' : 'system');
+  syncWindowBackground();
 }
 
 // 存量配置兜底：electron-store 的 defaults 只是浅合并，老版本写的 store 可能缺新字段，
@@ -62,10 +88,6 @@ function ensureDefaults() {
     raw.settings.network.proxyUrl = '';
     changed = true;
   }
-  if (typeof raw.settings.floating.edgeSnap !== 'boolean') {
-    raw.settings.floating.edgeSnap = d.settings.floating.edgeSnap;
-    changed = true;
-  }
   if (Array.isArray(raw.settings.indices.selected)) {
     // 只保留已知指数 id，清掉历史脏数据
     const known = new Set(INDICES.map((i) => i.id));
@@ -84,6 +106,10 @@ function ensureDefaults() {
   }
   if (!Number.isFinite(Number(raw.settings.main.refreshIntervalSeconds))) {
     raw.settings.main.refreshIntervalSeconds = d.settings.main.refreshIntervalSeconds;
+    changed = true;
+  }
+  if (typeof raw.settings.main.marketHoursOnly !== 'boolean') {
+    raw.settings.main.marketHoursOnly = d.settings.main.marketHoursOnly;
     changed = true;
   }
   if (changed) store.set(raw);
@@ -396,10 +422,49 @@ function broadcastMarket() {
   if (floatWin && !floatWin.isDestroyed()) floatWin.webContents.send('market:update', payload);
 }
 
+// ---------- 轮询调度：只在交易时段打接口 ----------
+// 收盘 / 午休 / 周末 / 节假日一律不发请求；15:00~15:30 留一个快照窗口，
+// 保证收盘后仍能拿到当天最后一条数据。定时器最多睡 60 秒，便于设置变更后快速响应。
+let smartTimer = null;
+let closeSnapshotDay = '';              // 已经补抓过收盘快照的交易日
+let sessionInfo = { phase: 'closed', day: '', nextChangeAt: 0 };
+
+function broadcastSession() {
+  const payload = { ...sessionInfo, label: describePhase(sessionInfo.phase) };
+  for (const w of [mainWin, floatWin]) {
+    if (w && !w.isDestroyed()) w.webContents.send('session:update', payload);
+  }
+}
+
+function scheduleTick(ms) {
+  if (smartTimer) clearTimeout(smartTimer);
+  smartTimer = setTimeout(() => { tick().catch(() => { /* 出错也别停掉调度 */ }); }, Math.max(200, Math.min(Number(ms) || 0, 60000)));
+}
+
+async function tick() {
+  const cfg = getState().settings.main || {};
+  // 该不该请求、下一次睡多久，全部由纯函数决定（见 common/market-hours.js，有单测覆盖）
+  const plan = planTick(cfg, new Date(), { closeSnapshotDay });
+
+  if (plan.info) {
+    const changed = plan.info.phase !== sessionInfo.phase || plan.info.day !== sessionInfo.day;
+    sessionInfo = plan.info;
+    if (changed) broadcastSession();
+  }
+
+  if (plan.action === 'fetch') {
+    await refreshMarket('auto');
+  } else if (plan.action === 'snapshot') {
+    closeSnapshotDay = plan.info.day;   // 当天只补抓一次
+    await refreshMarket('close');
+  }
+  scheduleTick(plan.delay);
+}
+
 function restartPoll() {
-  if (pollTimer) clearInterval(pollTimer);
-  const secs = Math.max(2, Number(getState().settings.main.refreshIntervalSeconds) || 3);
-  pollTimer = setInterval(() => refreshMarket('auto'), secs * 1000);
+  if (smartTimer) clearTimeout(smartTimer);
+  smartTimer = null;
+  scheduleTick(0);
 }
 
 // ---------- 托盘提示轮播 ----------
@@ -440,6 +505,7 @@ function createMainWindow() {
     title: '工位看盘',
     icon: APP_ICON,
     autoHideMenuBar: true,
+    backgroundColor: themeBackground(effectiveTheme()),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -468,82 +534,31 @@ function floatSize() {
   return { w, h };
 }
 
-// ---------- 浮窗贴边吸附 / 收起成小球 ----------
-const FLOAT_SNAP_PX = 20;      // 离边缘多少像素内算贴边
-const FLOAT_BALL_SIZE = 46;    // 收起后的小球尺寸
-let floatEdge = null;          // 当前吸附在哪个边
-let floatCollapsed = false;
-let floatDragTimer = null;
-let floatLayoutBusy = false;   // 自己调 setPosition/setContentSize 时屏蔽 moved 回调
+// ---------- 浮窗 ----------
 let floatExpandedHeight = 360; // 展开时的高度（由渲染层回报）
+let floatRevealed = false;     // 是否已经显示过（等渲染层报高度后再显示，避免先出现再跳一下）
 
 function workArea() {
   return screen.getPrimaryDisplay().workArea;
 }
 
-function sendFloatState() {
-  if (floatWin && !floatWin.isDestroyed()) {
-    floatWin.webContents.send('float:state', { collapsed: floatCollapsed, edge: floatEdge });
-  }
-}
-
-// 拖动结束后：贴边 + （左右侧）收起成小球
-function settleFloat() {
-  if (!floatWin || floatWin.isDestroyed()) return;
-  if (!getState().settings.floating.edgeSnap) return;
-  const wa = workArea();
-  const b = floatWin.getBounds();
-  const edge = nearestEdge(b, wa, FLOAT_SNAP_PX);
-  floatLayoutBusy = true;
-  try {
-    if (edge) {
-      floatEdge = edge;
-      const { x, y } = snapToEdge(b, wa, edge);
-      floatWin.setPosition(x, y);
-      if (canCollapse(edge) && !floatCollapsed) setFloatCollapsed(true);
-      else if (!canCollapse(edge) && floatCollapsed) setFloatCollapsed(false);
-    } else {
-      // 拖离边缘 = 取消贴边，回到展开态
-      floatEdge = null;
-      if (floatCollapsed) setFloatCollapsed(false);
-    }
-  } finally {
-    setTimeout(() => { floatLayoutBusy = false; }, 60);
-  }
-  sendFloatState();
-}
-
-function setFloatCollapsed(collapsed) {
-  if (!floatWin || floatWin.isDestroyed()) return;
-  const wa = workArea();
-  const b = floatWin.getBounds();
-  if (collapsed) {
-    floatExpandedHeight = b.height;
-    const pos = collapsedBounds(wa, floatEdge || 'right', FLOAT_BALL_SIZE, b.y);
-    floatWin.setContentSize(FLOAT_BALL_SIZE, FLOAT_BALL_SIZE);
-    floatWin.setPosition(pos.x, pos.y);
-    floatCollapsed = true;
-  } else {
-    const { w } = floatSize();
-    const h = Math.max(120, Math.min(560, floatExpandedHeight || 360));
-    const x = floatEdge === 'left' ? wa.x : (floatEdge === 'right' ? wa.x + wa.width - w : b.x);
-    const y = Math.min(Math.max(b.y, wa.y), wa.y + wa.height - h);
-    floatWin.setContentSize(w, h);
-    floatWin.setPosition(x, Math.round(y));
-    floatCollapsed = false;
-  }
-  sendFloatState();
+// 渲染层报完真实高度后才显示：否则窗口会先按初始高度出现、再被缩放，看起来像闪了两次
+function revealFloat() {
+  if (!floatWin || floatWin.isDestroyed() || floatRevealed) return;
+  floatRevealed = true;
+  floatWin.showInactive(); // 不抢焦点，摸鱼时不打断当前操作
 }
 
 function createFloatWindow() {
   const { w, h } = floatSize();
   const { x, y } = floatPosition(w, h);
-  floatCollapsed = false;
   floatExpandedHeight = h;
+  floatRevealed = false;
   floatWin = new BrowserWindow({
     width: w,
     height: h,
     x, y,
+    show: false, // 关键：先别显示
     title: '工位看盘浮窗',
     icon: APP_ICON,
     frame: false,
@@ -555,20 +570,64 @@ function createFloatWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   floatWin.setOpacity(Number(getState().settings.floating.opacity ?? 88) / 100);
+  floatWin.setMenu(null);                 // 无边框窗口不需要系统菜单
   floatWin.loadFile(path.join(__dirname, 'float', 'float.html'));
-  // 拖动结束（250ms 内没有新的 moved）后再贴边，避免拖动过程中窗口被不断挪走
-  floatWin.on('moved', () => {
-    if (floatLayoutBusy) return;
-    if (floatDragTimer) clearTimeout(floatDragTimer);
-    floatDragTimer = setTimeout(() => { floatDragTimer = null; settleFloat(); }, 250);
+  // 右键给一套自己的菜单，而不是系统的默认菜单
+  floatWin.webContents.on('context-menu', (e) => {
+    e.preventDefault();
+    showFloatMenu();
   });
-  floatWin.on('closed', () => { floatWin = null; });
+  // 兜底：万一渲染层一直没回报高度，也不能让窗口一直不可见
+  setTimeout(() => revealFloat(), 800);
+  floatWin.on('closed', () => { floatWin = null; floatRevealed = false; });
+}
+
+// 浮窗右键菜单
+function showFloatMenu() {
+  if (!floatWin || floatWin.isDestroyed()) return;
+  const st = getState();
+  const menu = Menu.buildFromTemplate([
+    { label: '立即刷新', click: () => refreshMarket('manual') },
+    { label: '显示主窗口', click: () => showMainWindow() },
+    { label: '设置…', click: () => { showMainWindow(); if (mainWin) mainWin.webContents.send('ui:open-settings'); } },
+    { type: 'separator' },
+    { label: '隐藏浮窗（Ctrl+Shift+M）', click: () => { if (floatWin) floatWin.hide(); } },
+    {
+      label: st.settings.floating.enabled ? '停用浮窗' : '启用浮窗',
+      click: () => {
+        const next = !getState().settings.floating.enabled;
+        const cur = getState();
+        cur.settings.floating.enabled = next;
+        store.set(cur);
+        if (!next && floatWin) floatWin.hide();
+        broadcastStore();
+        if (next && (!floatWin || floatWin.isDestroyed())) createFloatWindow();
+        else if (next && floatWin) { floatWin.showInactive(); broadcastMarket(); }
+      },
+    },
+    { type: 'separator' },
+    { label: '退出工位看盘', click: () => { app.quitting = true; app.quit(); } },
+  ]);
+  menu.popup({ window: floatWin });
+}
+
+function showMainWindow() {
+  if (!mainWin || mainWin.isDestroyed()) createMainWindow();
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
 }
 
 function toggleFloat() {
   if (floatWin && !floatWin.isDestroyed()) {
-    if (floatWin.isVisible()) floatWin.hide();
-    else { floatWin.show(); broadcastMarket(); }
+    if (floatWin.isVisible()) {
+      floatWin.hide();
+    } else if (floatRevealed) {
+      // 先让渲染层把数据/高度更新完再显示，避免显示后被缩放
+      broadcastMarket();
+      floatWin.showInactive();
+    }
+    // 还没 reveal 过说明刚创建，等它自己显示
   } else {
     // 显式点「浮窗」/热键时一律创建并显示（开启开关语义，不只受设置里的 enabled 限制）
     createFloatWindow();
@@ -628,6 +687,17 @@ function registerIpc() {
     },
   }));
   ipcMain.handle('proxy:apply', () => applyProxy());
+  // 连通性测试：真实请求三条行情通道（走当前代理设置），设置页里随手点一下就能知道通不通
+  ipcMain.handle('proxy:test', async () => {
+    const t0 = Date.now();
+    const results = await connectivityTest();
+    return {
+      at: Date.now(),
+      elapsedMs: Date.now() - t0,
+      proxy: { mode: proxyStatus.mode, resolved: describeResolvedProxy(proxyStatus.resolved), error: proxyStatus.error },
+      results,
+    };
+  });
   ipcMain.handle('update:check', () => checkForUpdates());
   ipcMain.handle('update:state', () => updateState);
   ipcMain.handle('open:external', (_e, url) => {
@@ -744,55 +814,34 @@ function registerIpc() {
   ipcMain.handle('float:toggle', () => { toggleFloat(); return true; });
   ipcMain.handle('float:hide', () => { if (floatWin) floatWin.hide(); return true; });
 
-  // 浮窗高度自适应：渲染完后由浮窗回报内容高度，窗口贴合内容（避免透明区域挡住下方点击）
+  // 浮窗高度自适应：渲染完后由浮窗回报内容高度，窗口贴合内容
   ipcMain.on('float:resize', (e, rawH) => {
     if (!floatWin || floatWin.isDestroyed() || e.sender !== floatWin.webContents) return;
-    if (floatCollapsed) return; // 收起成小球时不做高度自适应
     const h = Math.max(80, Math.min(560, Math.round(Number(rawH) || 0)));
     if (!h) return;
     const [w, curH] = floatWin.getContentSize();
-    if (Math.abs(curH - h) <= 2) return;
-    floatExpandedHeight = h;
-    floatLayoutBusy = true;
-    try {
-      floatWin.setContentSize(w, h);
-      const x = floatEdge === 'left'
-        ? workArea().x
-        : (floatEdge === 'right' ? workArea().x + workArea().width - w : floatWin.getBounds().x);
-      const { y } = floatPosition(w, h);
-      floatWin.setPosition(x, floatEdge ? Math.min(Math.max(floatWin.getBounds().y, workArea().y), workArea().y + workArea().height - h) : y);
-    } finally {
-      setTimeout(() => { floatLayoutBusy = false; }, 60);
+    // 首次回报即认为渲染完成：先按真实高度定好尺寸，再显示，避免"出现→跳一下"
+    if (Math.abs(curH - h) <= 2) {
+      revealFloat();
+      return;
     }
+    floatExpandedHeight = h;
+    floatWin.setContentSize(w, h);
+    // 只夹紧垂直位置，水平位置保持用户拖到的地方
+    const b = floatWin.getBounds();
+    const wa = workArea();
+    floatWin.setPosition(b.x, Math.min(Math.max(b.y, wa.y), wa.y + wa.height - h));
+    revealFloat();
   });
 
-  // 浮窗收起 / 展开（渲染层鼠标移入移出、双击触发）
-  ipcMain.handle('float:collapse', (_e, collapsed) => {
-    if (!floatWin || floatWin.isDestroyed()) return false;
-    if (collapsed && !canCollapse(floatEdge)) return false; // 未贴左右边时不收起
-    setFloatCollapsed(!!collapsed);
-    return true;
-  });
-  ipcMain.handle('float:toggle-collapse', () => {
-    if (!floatWin || floatWin.isDestroyed()) return false;
-    if (!floatCollapsed) {
-      // 手动收起时若没贴边，先贴到离得最近的一侧
-      if (!canCollapse(floatEdge)) {
-        const wa = workArea();
-        const b = floatWin.getBounds();
-        const side = (b.x + b.width / 2) < (wa.x + wa.width / 2) ? 'left' : 'right';
-        floatEdge = side;
-        floatLayoutBusy = true;
-        try {
-          const { x, y } = snapToEdge(b, wa, side);
-          floatWin.setPosition(x, y);
-        } finally { setTimeout(() => { floatLayoutBusy = false; }, 60); }
-      }
-      setFloatCollapsed(true);
-    } else {
-      setFloatCollapsed(false);
-    }
-    return floatCollapsed;
+  // 指数拖拽排序：selected 的顺序即展示顺序
+  ipcMain.handle('indices:reorder', (_e, ids) => {
+    const st = getState();
+    st.settings.indices.selected = applyIndexOrder(st.settings.indices.selected || [], ids);
+    st.updatedAt = new Date().toISOString();
+    store.set(st);
+    broadcastStore();
+    return st.settings.indices.selected;
   });
 
   // 指数单选原子切换（主进程单线程读改写，前端连点再快也不丢操作；
@@ -841,6 +890,7 @@ function registerIpc() {
     st.updatedAt = new Date().toISOString();
     store.set(st);
     if (patch.network) await applyProxy();
+    if (patch.main && 'theme' in patch.main) applyNativeTheme();
     if (floatWin) {
       floatWin.setOpacity(Number(st.settings.floating.opacity ?? 88) / 100);
       const { x, y } = floatPosition(floatWin.getBounds().width, floatWin.getBounds().height);
@@ -890,16 +940,20 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     registerIpc();
+    applyNativeTheme(); // 先定好深浅色，再开窗口，免得标题栏先白一下
+    // 跟随系统时，Windows 切换深浅色要同步窗口底色（原生标题栏由 nativeTheme 自动跟）
+    nativeTheme.on('updated', () => syncWindowBackground());
     // 先把网络层准备好（net.fetch + 代理策略），再发第一批行情
     await setupNetwork();
     createMainWindow();
     if (getState().settings.floating.enabled) createFloatWindow();
     createTray();
     globalShortcut.register('CommandOrControl+Shift+M', toggleFloat);
-    restartPoll();
     startBadgeRotate();
     broadcastIndexMetaNow();
+    // 先拉一次（哪怕已收盘，也让界面立刻有上一笔收盘价），再交给交易时段调度
     refreshMarket('init');
+    restartPoll();
     maybeAutoCheckUpdate();
 
     app.on('activate', () => {
@@ -913,7 +967,7 @@ if (!gotLock) {
 
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
-    if (pollTimer) clearInterval(pollTimer);
+    if (smartTimer) clearTimeout(smartTimer);
     if (badgeRotateTimer) clearInterval(badgeRotateTimer);
   });
 }

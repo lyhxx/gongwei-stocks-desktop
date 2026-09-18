@@ -1,11 +1,8 @@
 // 工位看盘 - 浮窗逻辑（透明置顶）
-// 两种形态：展开（顶栏 + 指数横排 + 个股列表）/ 收起（贴边小球，鼠标移入展开）
+// 结构：顶栏（更新时间 + 涨跌家数）→ 指数横排卡片 → 个股列表
 let state = null;
 let market = { stockQuotes: [], indexQuotes: [] };
 let lastHeight = 0;
-let collapsed = false;
-let floatEdge = null;
-let collapseTimer = null;
 
 // 内容高度回报给主进程，让窗口贴合内容（否则底部透明区会挡住下方窗口的点击）
 function syncHeight() {
@@ -34,12 +31,6 @@ async function boot() {
   render();
   window.gongwei.onMarket((m) => { market = m; render(); });
   window.gongwei.onStore((s) => { state = s; render(); });
-  window.gongwei.onFloatState((s) => {
-    collapsed = !!(s && s.collapsed);
-    floatEdge = (s && s.edge) || null;
-    applyCollapsedClass();
-    render();
-  });
   window.gongwei.onAlert(() => {
     const card = document.querySelector('.card');
     card.classList.remove('flash');
@@ -49,50 +40,6 @@ async function boot() {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') window.gongwei.hideFloat();
   });
-  // 收起态：鼠标移入展开；展开态且贴边：鼠标移出后自动收回
-  const card = document.querySelector('.card');
-  card.addEventListener('mouseenter', () => {
-    if (collapseTimer) { clearTimeout(collapseTimer); collapseTimer = null; }
-    if (collapsed) window.gongwei.collapseFloat(false);
-  });
-  card.addEventListener('mouseleave', () => {
-    if (collapsed || !floatEdge) return;
-    if (collapseTimer) clearTimeout(collapseTimer);
-    collapseTimer = setTimeout(() => {
-      collapseTimer = null;
-      if (!collapsed && floatEdge) window.gongwei.collapseFloat(true);
-    }, 1200);
-  });
-  // 双击切换收起/展开（不依赖鼠标悬停）
-  card.addEventListener('dblclick', () => window.gongwei.toggleFloatCollapse());
-}
-
-function applyCollapsedClass() {
-  const card = document.querySelector('.card');
-  if (!card) return;
-  card.classList.toggle('collapsed', collapsed);
-  const wrap = document.getElementById('ball');
-  if (wrap) wrap.hidden = !collapsed;
-  const body = document.getElementById('expanded');
-  if (body) body.hidden = collapsed;
-}
-
-// 收起态小球：显示涨跌家数，颜色表示强弱
-function renderBall() {
-  const byId = new Map((market.stockQuotes || []).map((q) => [q.stockId, q]));
-  let up = 0;
-  let down = 0;
-  for (const s of (state && state.stocks) || []) {
-    if (s.badgeEnabled === false) continue;
-    const q = byId.get(s.id);
-    if (q && q.ok) (q.changePercent >= 0 ? up++ : down++);
-  }
-  const ball = document.getElementById('ball');
-  if (!ball) return;
-  const tone = up === down ? 'flat' : (up > down ? 'up' : 'down');
-  ball.className = `ball ${tone}`;
-  ball.textContent = (up + down) ? `${up}/${down}` : '--';
-  ball.title = `涨 ${up} 跌 ${down}（鼠标移入展开，双击收起/展开）`;
 }
 
 function pctText(v, ok) {
@@ -103,9 +50,6 @@ function pctText(v, ok) {
 function render() {
   if (!state) return;
   applyFloatTheme();
-  applyCollapsedClass();
-  renderBall();
-  if (collapsed) return; // 小球形态不需要渲染展开内容，也不做高度自适应
   document.getElementById('time').textContent = '更新 ' + (market.updatedAt
     ? new Date(market.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })
     : '--:--:--');

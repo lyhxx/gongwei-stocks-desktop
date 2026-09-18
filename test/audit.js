@@ -79,6 +79,24 @@ for (const [label, js] of [['renderer', appJs], ['float', floatJs]]) {
 if (/nodeIntegration\s*:\s*true/.test(mainJs)) problems.push('main.js 开启了 nodeIntegration');
 if (/contextIsolation\s*:\s*false/.test(mainJs)) problems.push('main.js 关闭了 contextIsolation');
 
+// 主题必须同时作用到原生窗口：只改网页内部的话，Windows 标题栏会一直是浅色
+if (!/nativeTheme\.themeSource\s*=/.test(mainJs)) {
+  problems.push('main.js 未同步 nativeTheme.themeSource，深色模式下系统标题栏不会跟着变');
+}
+if (!/themeBackground\(effectiveTheme\(\)\)/.test(mainJs)) {
+  problems.push('main.js 窗口 backgroundColor 未跟随主题，切换时可能闪白');
+}
+// 透明浮窗一旦被设成不透明底色，透明区会被填实、圆角外露出直角（曾踩过）
+const bgCallSites = [...mainJs.matchAll(/setBackgroundColor\(/g)].map((m) => m.index);
+for (const at of bgCallSites) {
+  const ctx = mainJs.slice(Math.max(0, at - 220), at + 60);
+  if (/floatWin/.test(ctx)) problems.push('main.js 给透明浮窗设了底色，圆角外会露出直角');
+}
+// 浮窗右键要给自己的一套菜单，而不是系统默认菜单
+if (!/floatWin\.webContents\.on\('context-menu'/.test(mainJs) || !/function showFloatMenu\(/.test(mainJs)) {
+  problems.push('浮窗右键菜单未实现（应拦截 context-menu 并弹出自己的菜单）');
+}
+
 // 请求必须走 common/http.js 统一出口，否则换成 net.fetch 后代理会失效
 const providers = read('src/common/providers.js');
 if (/(?<![\w.])fetch\s*\(/.test(providers.replace(/fetchWithTimeout\s*\(/g, ''))) {

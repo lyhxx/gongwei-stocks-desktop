@@ -535,6 +535,41 @@ async function searchXueqiu(keyword, count = 10) {
   return parseXueqiuSuggest(data).slice(0, count);
 }
 
+// 连通性测试：三条行情通道各打一发，用来判断「当前网络/代理到底通不通」
+// 与自检的区别：只测 3 条、超时更短（4s），适合在设置里随手点一下
+async function connectivityTest() {
+  const jobs = [
+    () => probe(
+      '腾讯',
+      'https://smartbox.gtimg.cn/s3/?q=600000&t=all',
+      { Referer: 'https://gu.qq.com/', 'User-Agent': UA },
+      (buf) => (parseSmartbox(buf.toString('utf8')).length ? { ok: true, detail: '正常' } : { ok: false, detail: '无结果' }),
+      4000,
+    ),
+    () => probe(
+      '东财',
+      `https://push2.eastmoney.com/api/qt/stock/get?secid=1.600000&fields=f43,f58&ut=${EASTMONEY_UT}&fltt=1&invt=2&_=${Date.now()}`,
+      { Referer: 'https://quote.eastmoney.com/', 'User-Agent': UA },
+      (buf) => {
+        try {
+          const d = JSON.parse(buf.toString('utf8'));
+          return (d && d.data && d.data.f43 != null) ? { ok: true, detail: '正常' } : { ok: false, detail: '无数据' };
+        } catch { return { ok: false, detail: '解析失败' }; }
+      },
+      4000,
+    ),
+    () => probe(
+      '新浪',
+      'https://hq.sinajs.cn/list=sh600000',
+      { Referer: 'https://finance.sina.com.cn/', 'User-Agent': UA },
+      (buf) => (parseSinaLine(buf.toString('latin1').split(';')[0] || '') ? { ok: true, detail: '正常' } : { ok: false, detail: '无数据' }),
+      4000,
+    ),
+  ];
+  const results = await Promise.all(jobs.map((f) => f()));
+  return results;
+}
+
 // ---- 接口自检（App 内运行，跑出每条通道的真实证据） ----
 // 每个探针：发真实请求 → 校验返回格式 → 记录耗时/结果摘要
 async function probe(name, url, headers, validate, timeoutMs = 8000) {
@@ -683,6 +718,6 @@ module.exports = {
   parseSinaLine, parseTencentLine, parseSmartbox, parseSinaSuggest, parseXueqiuSuggest, directCodeCandidate,
   fetchEastmoney, fetchSina, fetchTencent,
   fetchQuotesWithFallback, searchEastmoney, searchTencent, searchSina, searchXueqiu, searchStocks,
-  selfTest,
+  selfTest, connectivityTest,
 };
 
