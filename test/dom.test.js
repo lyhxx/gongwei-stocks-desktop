@@ -9,6 +9,8 @@ const html = fs.readFileSync(path.join(root, 'src', 'renderer', 'index.html'), '
 const appJs = fs.readFileSync(path.join(root, 'src', 'renderer', 'app.js'), 'utf8');
 const fhtml = fs.readFileSync(path.join(root, 'src', 'float', 'float.html'), 'utf8');
 const fjs = fs.readFileSync(path.join(root, 'src', 'float', 'float.js'), 'utf8');
+const chtml = fs.readFileSync(path.join(root, 'src', 'chart', 'chart.html'), 'utf8');
+const cjs = fs.readFileSync(path.join(root, 'src', 'chart', 'chart.js'), 'utf8');
 
 const store = {
   schemaVersion: 1,
@@ -52,6 +54,7 @@ let proxyMock = { mode: 'system', resolved: 'HTTP 代理 127.0.0.1:7897', error:
 let updateMock = { checked: true, hasUpdate: false, current: '1.0.0', latest: '1.0.0', url: '', notes: '', asset: null, error: '', at: Date.now() };
 let reorderCalls = [];
 let indexReorderCalls = [];
+let chartOpens = [];
 const diagMock = {
   source: 'none',
   errors: [
@@ -77,8 +80,6 @@ window.gongwei = {
   addStock: async () => ({}),
   removeStock: async () => true,
   updateAlert: async () => ({}),
-  updateStock: async () => ({}),
-  moveStock: async () => true,
   reorderStocks: async (ids) => { reorderCalls.push(ids); return ids; },
   reorderIndices: async (ids) => { indexReorderCalls.push(ids); return ids; },
   snoozeStock: async () => ({}),
@@ -99,7 +100,6 @@ window.gongwei = {
   hideFloat: async () => true,
   floatResize: () => {},
   checkUpdate: async () => updateMock,
-  getUpdateState: async () => updateMock,
   openExternal: async () => true,
   onUpdateState: (cb) => { listeners.update = cb; },
   onSession: (cb) => { listeners.session = cb; },
@@ -123,9 +123,11 @@ window.gongwei = {
     proxy: proxyMock,
   }),
   selftest: async () => ({ at: Date.now(), results: [] }),
+  openChart: async (stock) => { chartOpens.push(stock); return true; },
   onMarket: (cb) => { listeners.market = cb; },
   onStore: (cb) => { listeners.store = cb; },
   onAlert: (cb) => { listeners.alert = cb; },
+  onFloatSync: (cb) => { listeners.floatSync = cb; },
 };
 window.matchMedia = () => ({ matches: false, addEventListener: () => {} });
 dom.window.eval(appJs);
@@ -624,6 +626,18 @@ async function runQueued() {  for (const item of queued) {
     assert.strictEqual(reorderCalls.length, 0, '点击不应触发排序');
   });
 
+  t('K 线按钮：点击打开独立窗口（不再用主窗口弹窗）', async () => {
+    chartOpens = [];
+    const btn = d.querySelector('#stocks .stock [data-act="chart"]');
+    assert.ok(btn, '自选行应有 K 线按钮');
+    assert.strictEqual(d.getElementById('klineChart'), null, '主窗口不应内嵌图表容器');
+    btn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(chartOpens.length, 1, '应调用 openChart');
+    assert.strictEqual(chartOpens[0].code, '600000');
+    assert.ok(!d.querySelector('.kline-modal'), '不应再弹主窗口弹窗');
+  });
+
   // 所有用例注册完毕后再串行跑异步用例；queue 里若还有剩余说明有用例被漏跑，必须报错
   await runQueued();
   if (queued.some((q) => !q.done)) {
@@ -676,6 +690,91 @@ async function runQueued() {  for (const item of queued) {
     assert.ok(/\.alert-grid\s*\{[^}]*minmax\(0,\s*1fr\)/.test(css), 'alert-grid 必须用 minmax(0,1fr) 才能被输入框压缩');
     assert.ok(/\.alert-grid input\s*\{[^}]*min-width:\s*0/.test(css), 'alert-grid 输入框需 min-width:0');
   });
+
+  console.log('[K线窗口]');
+  const cdom = new JSDOM(chtml, { url: 'http://localhost/', runScripts: 'outside-only' });
+  const cwin = cdom.window;
+  const chartOptions = [];
+  cwin.echarts = { init: () => ({ setOption: (o) => chartOptions.push(o), resize: () => {}, clear: () => {}, on: () => {} }) };
+  cwin.matchMedia = () => ({ matches: false });
+  cwin.gongwei = {
+    getStore: async () => JSON.parse(JSON.stringify(store)),
+    getChartStock: async () => ({ id: 's1', code: '600000', name: '浦发银行', market: 'CN', exchange: 'SH' }),
+    getKline: async () => ({
+      code: '600000', name: '浦发银行', decimals: 2,
+      klines: [
+        { date: '2026-09-16', open: 10, close: 10.5, high: 10.6, low: 9.9, volume: 100000, amount: 1e8, changePercent: 5 },
+        { date: '2026-09-17', open: 10.5, close: 10.2, high: 10.7, low: 10.1, volume: 80000, amount: 8e7, changePercent: -2.86 },
+        { date: '2026-09-18', open: 10.2, close: 10.4, high: 10.5, low: 10.0, volume: 90000, amount: 9e7, changePercent: 1.96 },
+      ],
+    }),
+    getTrends: async () => ({
+      code: '600000', name: '浦发银行', preClose: 10, decimals: 2,
+      trends: [
+        { time: '2026-09-17 09:30', price: 10.1, volume: 1000, avgPrice: 10.1 },
+        { time: '2026-09-17 09:31', price: 10.05, volume: 1200, avgPrice: 10.08 },
+      ],
+    }),
+    getDetail: async () => ({ code: '600000', name: '浦发银行', decimals: 2, open: 10.0, preClose: 9.9, high: 10.2, low: 9.8, volume: 123456, amount: 1.2e8, turnover: 0.16 }),
+    onStore: (cb) => { cwin.__onStore = cb; },
+    onChartUpdate: (cb) => { cwin.__onChart = cb; },
+  };
+  cwin.eval(cjs);
+  await new Promise((r) => setTimeout(r, 50));
+  const cd = cwin.document;
+  ft('K线窗口：默认打开分时，明细齐全，右侧 ±10% 且 0 居中', () => {
+    assert.ok(chartOptions.length >= 1, '应已绘制');
+    const t = chartOptions[chartOptions.length - 1];
+    assert.strictEqual(t.series[0].type, 'line', '默认应为分时折线');
+    assert.ok(cd.querySelector('#klineTabs button[data-period="trend"]').classList.contains('active'));
+    const info = cd.getElementById('klineInfo').textContent;
+    ['今开', '昨收', '今高', '今低', '成交量', '成交额', '换手率'].forEach((k) => assert.ok(info.includes(k), k));
+    assert.ok(info.includes('0.16%'), '换手率应有值：' + info);
+    assert.strictEqual(t.yAxis[2].position, 'right');
+    assert.ok(Math.abs(t.yAxis[2].min - 9) < 1e-9, String(t.yAxis[2].min));
+    assert.ok(Math.abs(t.yAxis[2].max - 11) < 1e-9, String(t.yAxis[2].max));
+    assert.strictEqual(t.yAxis[2].axisLabel.formatter(10), '0.00%');
+    assert.strictEqual(t.yAxis[2].axisLabel.formatter(11), '+10.00%');
+    assert.strictEqual(t.yAxis[2].axisLabel.formatter(9), '-10.00%');
+    const lbl = t.xAxis[1].axisLabel;
+    assert.strictEqual(lbl.interval(0), true, '开盘时间应显示');
+    assert.strictEqual(lbl.interval(t.xAxis[1].data.length - 1), true, '收盘时间应显示');
+  });
+  cd.querySelector('#klineTabs button[data-period="day"]').click();
+  await new Promise((r) => setTimeout(r, 30));
+  ft('K线窗口：日K含蜡烛/均线/成交量，十字光标联动，右侧 0 居中', () => {
+    const o = chartOptions[chartOptions.length - 1];
+    assert.strictEqual(o.series[0].type, 'candlestick');
+    const maNames = o.series.filter((s) => s.type === 'line').map((s) => s.name);
+    assert.deepStrictEqual([...maNames], ['MA5', 'MA10', 'MA20', 'MA30']);
+    assert.ok(o.series.some((s) => s.name === '成交量' && s.type === 'bar'), '应有成交量副图');
+    assert.ok(o.axisPointer && o.axisPointer.link, '应有 axisPointer.link 联动');
+    // 悬停时间只在最底部 X 轴显示一次
+    assert.strictEqual(o.xAxis[0].axisPointer.label.show, false, '主图不显示指针时间');
+    assert.strictEqual(o.xAxis[1].axisPointer.label.show, true, '副图显示指针时间');
+    // 右侧涨跌幅轴：0 居中
+    assert.strictEqual(o.yAxis.length, 3, 'K线应有价格轴/成交量轴/右侧涨跌幅轴');
+    assert.strictEqual(o.yAxis[2].position, 'right');
+    const mid = (o.yAxis[2].min + o.yAxis[2].max) / 2;
+    assert.strictEqual(o.yAxis[2].axisLabel.formatter(mid), '0.00%', '中轴应为 0');
+    // 成交量轴不写死 max
+    assert.strictEqual(o.yAxis[1].max, undefined);
+    // 底部只标「可见区间」首尾两个日期（默认缩放到 55%~100%，第 0 根在可视区外）
+    const dates = o.xAxis[1].data;
+    const iv = o.xAxis[1].axisLabel.interval;
+    const shown = dates.map((_, i) => i).filter((i) => iv(i));
+    assert.strictEqual(shown.length, 2, '应只标两个日期：' + shown.join(','));
+    assert.strictEqual(iv(0), false, '不可见区间的第 0 根不标');
+    assert.strictEqual(iv(dates.length - 1), true, '可见末根要标');
+    assert.strictEqual(cd.getElementById('volLabel').textContent, '成交量');
+  });
+  cwin.__onChart({ id: 's2', code: '000001', name: '平安银行', market: 'CN', exchange: 'SZ' });
+  await new Promise((r) => setTimeout(r, 30));
+  ft('K线窗口：收到 chart:update 会切换到新标的', () => {
+    assert.ok(cd.getElementById('klineTitle').textContent.includes('000001'), cd.getElementById('klineTitle').textContent);
+  });
+  // 关闭窗口以清掉图表窗口里的自动刷新定时器，避免测试进程不退出
+  if (typeof cwin.close === 'function') cwin.close();
 
   console.log(`\nDOM: 共 ${passed} 项，${process.exitCode ? '有失败' : '全部通过'}`);
 })();

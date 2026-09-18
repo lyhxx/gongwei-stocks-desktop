@@ -4,17 +4,19 @@ let state = null;
 let market = { stockQuotes: [], indexQuotes: [] };
 let lastHeight = 0;
 
-// 内容高度回报给主进程，让窗口贴合内容（否则底部透明区会挡住下方窗口的点击）
-function syncHeight() {
-  requestAnimationFrame(() => {
-    const card = document.querySelector('.card');
-    if (!card) return;
-    const h = Math.ceil(card.getBoundingClientRect().height);
-    if (h > 40 && Math.abs(h - lastHeight) > 2) {
-      lastHeight = h;
-      window.gongwei.floatResize(h);
-    }
-  });
+// 内容高度回报给主进程，让窗口贴合内容（否则底部透明区会挡住下方窗口的点击）。
+// 必须同步测量，不能包在 requestAnimationFrame 里：窗口隐藏时 Chromium 会节流/暂停 rAF，
+// 隐藏期间的高度就不会上报，重新显示时才补一次 resize —— 表现就是「打开浮窗闪一下」。
+// innerHTML 写完后 getBoundingClientRect 会强制同步布局，读到的就是最新高度。
+// force=true 时无条件回报（主进程在「显示前」会主动要一次高度，用来把尺寸定好再 show）
+function syncHeight(force) {
+  const card = document.querySelector('.card');
+  if (!card) return;
+  const h = Math.ceil(card.getBoundingClientRect().height);
+  if (h > 40 && (force || Math.abs(h - lastHeight) > 2)) {
+    lastHeight = h;
+    window.gongwei.floatResize(h);
+  }
 }
 
 // 指数中英文映射（前端内置兜底，名字显示不再依赖主进程推送）
@@ -31,6 +33,9 @@ async function boot() {
   render();
   window.gongwei.onMarket((m) => { market = m; render(); });
   window.gongwei.onStore((s) => { state = s; render(); });
+  // 主进程在「显示前」要一次同步：先重算 DOM，再无条件回报高度，
+  // 让窗口在隐藏状态下就调到最终尺寸，show 之后不会再 resize（消除打开时的闪动）
+  window.gongwei.onFloatSync(() => render(true));
   window.gongwei.onAlert(() => {
     const card = document.querySelector('.card');
     card.classList.remove('flash');
@@ -47,7 +52,7 @@ function pctText(v, ok) {
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
 }
 
-function render() {
+function render(forceSync) {
   if (!state) return;
   applyFloatTheme();
   document.getElementById('time').textContent = '更新 ' + (market.updatedAt
@@ -107,7 +112,7 @@ function render() {
       <em class="${pct >= 0 ? 'up' : 'down'}">${pctText(pct, ok)}</em>`;
     list.appendChild(div);
   }
-  syncHeight();
+  syncHeight(forceSync);
 }
 
 function applyFloatTheme() {

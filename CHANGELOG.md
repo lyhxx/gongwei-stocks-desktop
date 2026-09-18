@@ -8,8 +8,17 @@
 
 ### 计划中
 
-- K 线 / 分时图、分组管理、持仓盈亏、老板键、数据备份
+- 分组管理、持仓盈亏、老板键、数据备份
 - 详见 [README 路线图](README.md#路线图)
+
+## [1.2.0] - 2026-09-19
+
+### 新增
+
+- **K 线 / 分时图**：自选行新增 K 线图标，在独立窗口查看分时、日K、周K、月K（可自由缩放，不受主窗口限制）；默认打开分时
+- **K 线明细**：顶部显示今开 / 昨收 / 今高 / 今低 / 成交量 / 成交额 / 换手率，交易时段每 5 秒自动刷新
+- **K 线图**：MA5/10/20/30 均线、成交量副图、主副图十字光标联动、右侧对称涨跌幅轴（0 居中）、鼠标悬停显示换手率；数据每 30 秒刷新且保留缩放位置
+- **说明**：数据走东方财富接口，仅按需请求，不参与主行情轮询；配色跟随浅色/深色主题
 
 ## [1.1.0] - 2026-09-18
 
@@ -77,6 +86,7 @@
 - GitHub Actions 打 tag 自动构建，产出安装包 / 绿色单文件 / 绿色解压版并发布 Release
 - 老版本配置自动补齐字段（`ensureDefaults` / `normalizeStocks`），避免升级后崩溃
 
-[未发布]: https://github.com/lyhxx/gongwei-stocks-desktop/compare/v1.1.0...HEAD
+[未发布]: https://github.com/lyhxx/gongwei-stocks-desktop/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/lyhxx/gongwei-stocks-desktop/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/lyhxx/gongwei-stocks-desktop/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/lyhxx/gongwei-stocks-desktop/releases/tag/v1.0.0

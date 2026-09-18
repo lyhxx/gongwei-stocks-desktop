@@ -76,7 +76,6 @@ button:disabled { opacity: .55; cursor: default; }
 button.danger { background: #fef2f2; border-color: var(--up); color: var(--up); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
-button.hide { display: none; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button, .suggest-item, .stock { transition: background-color .15s ease, border-color .15s ease; }
 
@@ -242,6 +241,9 @@ body.dragging-active .drag-handle { cursor: grabbing; }
 .icon-btn.bell.snooze { color: #f59e0b; }
 .icon-btn.chev { font-size: 15px; padding: 1px 7px; transition: transform .15s ease; }
 .icon-btn.chev.open { transform: rotate(90deg); }
+.icon-btn.chart { padding: 2px 5px; display: inline-flex; align-items: center; color: var(--muted); }
+.icon-btn.chart svg { display: block; }
+.icon-btn.chart:hover:not(:disabled) { color: var(--accent); }
 
 div.aconfig { margin-top: 7px; border-top: 1px dashed var(--border); padding-top: 7px; }
 div.aconfig[hidden] { display: none; }

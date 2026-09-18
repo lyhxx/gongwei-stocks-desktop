@@ -1,6 +1,6 @@
 {
   "name": "gongwei-stocks-desktop",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "工位看盘 - 隐蔽轻量的 Windows 桌面股票行情提醒助手",
   "productName": "工位看盘",
   "main": "src/main.js",
@@ -25,6 +25,7 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "echarts": "^5.6.0",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
     "jsdom": "^24.1.3"

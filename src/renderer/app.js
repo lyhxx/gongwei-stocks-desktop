@@ -319,6 +319,7 @@ function closeModal() {
   $('modalOverlay').hidden = true;
   document.body.classList.remove('modal-open');
 }
+
 function openSettings() {
   openModal('设置', 'settings', `
     <div class="set-group">
@@ -696,6 +697,9 @@ function onDragEnd(e) {
 const BELL_ON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M12 2.2a5.6 5.6 0 0 0-5.6 5.6v3.3l-1.5 3a1 1 0 0 0 .9 1.45h12.4a1 1 0 0 0 .9-1.45l-1.5-3V7.8A5.6 5.6 0 0 0 12 2.2Z"/><path fill="currentColor" d="M9.7 17.6a2.3 2.3 0 0 0 4.6 0H9.7Z"/></svg>';
 const BELL_OFF = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M12 3.4a4.6 4.6 0 0 0-4.6 4.6v3.2l-1.3 2.6a.8.8 0 0 0 .7 1.2h10.4a.8.8 0 0 0 .7-1.2l-1.3-2.6V8A4.6 4.6 0 0 0 12 3.4Z"/><path fill="none" stroke="currentColor" stroke-width="1.7" d="M10 18.1a2 2 0 0 0 4 0"/><line x1="4.2" y1="4.2" x2="19.8" y2="19.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
 
+// K 线图标（两根蜡烛），同样用 currentColor 以便跟随主题/状态变色
+const CHART_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="7" width="4" height="9" rx=".5" fill="currentColor"/><rect x="6.6" y="3" width=".8" height="18" fill="currentColor"/><rect x="15" y="5" width="4" height="6" rx=".5" fill="currentColor"/><rect x="16.6" y="3" width=".8" height="18" fill="currentColor"/></svg>';
+
 function bellLabel(a, snoozed) {
   if (!a.enabled) return '开启价格提醒';
   return snoozed ? '提醒已暂停，点击恢复' : '关闭价格提醒';
@@ -758,6 +762,7 @@ function renderStocks() {
         <span class="name" title="${escapeHtml(s.code)}">${escapeHtml(s.name)}<small>${escapeHtml(s.code)}</small>${tl ? `<i class="type-badge">${tl}</i>` : ''}</span>
         <span class="price">${fmtQuotePrice(q)}</span>
         <span class="pill ${up ? 'pct-up' : 'pct-down'}">${hasQ ? `${pct >= 0 ? '+' : ''}${fmt(pct)}%` : '--'}</span>
+        <button class="icon-btn chart" data-act="chart" title="查看K线 / 分时">${CHART_ICON}</button>
         <button class="icon-btn bell ${!a.enabled ? 'off' : (snoozed ? 'snooze' : 'on')}" data-act="bell" title="${bellLabel(a, snoozed)}">${!a.enabled ? BELL_OFF : BELL_ON}</button>
         <button class="icon-btn chev" data-act="chev" title="展开条件设置">›</button>
       </div>
@@ -782,6 +787,7 @@ function renderStocks() {
     const syncChev = () => chev.classList.toggle('open', !cfg.hidden);
     syncChev();
     chev.onclick = () => { cfg.hidden = !cfg.hidden; syncChev(); };
+    div.querySelector('[data-act="chart"]').onclick = () => window.gongwei.openChart(s);
     div.querySelector('[data-act="bell"]').onclick = async () => {
       const patch = { enabled: !a.enabled };
       if (!a.enabled) patch.snoozedUntil = null;
@@ -949,6 +955,7 @@ async function doSearch() {
 
 function onSuggestKey(e) {
   if ($('suggest').hidden) return;
+  if (!suggestItems.length) return; // 搜索中/无结果时列表为空，取模会得到 NaN
   if (e.key === 'ArrowDown') {
     e.preventDefault();
     suggestActive = (suggestActive + 1) % suggestItems.length;

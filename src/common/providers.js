@@ -9,9 +9,9 @@
 
 const EASTMONEY_UT = 'fa5fd1943c7b386f172d6893dbfba10b';
 const EASTMONEY_HOSTS = ['push2.eastmoney.com', 'push2delay.eastmoney.com'];
+// 只请求真正会用到的字段（现价/开高低/昨收/名称/精度/涨跌），字段越少响应体越小
 const EASTMONEY_FIELDS = [
-  'f43', 'f44', 'f45', 'f46', 'f60', 'f47', 'f48', 'f50',
-  'f168', 'f169', 'f170', 'f117', 'f57', 'f58', 'f59', 'f152', 'f86',
+  'f43', 'f44', 'f45', 'f46', 'f58', 'f59', 'f60', 'f152', 'f169', 'f170',
 ].join(',');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -28,12 +28,19 @@ function numScale(v, scale) {
   return Number.isFinite(n) ? n / scale : NaN;
 }
 function decimalsOf(v) {
-  const n = typeof v === 'number' ? v : Number(String(v ?? '').trim());
+  // 注意：空值必须返回 undefined。Number('') === 0 是合法整数，
+  // 若不先挡掉，缺失的 f59 会被当成「0 位小数」，价格直接被放大 100 倍
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = typeof v === 'number' ? v : Number(String(v).trim());
   return Number.isInteger(n) && n >= 0 && n <= 6 ? n : undefined;
 }
+// 精度优先取 f59，缺省时退回 f152，再退回港股 1000 / 其余 100
+// （f152 是东财的备用精度字段，早年只写了签名没用上，导致缺 f59 时精度会算错）
 function scaleFor(stock, f59, f152) {
   const a = decimalsOf(f59);
   if (a !== undefined) return 10 ** a;
+  const b = decimalsOf(f152);
+  if (b !== undefined) return 10 ** b;
   if (stock.market === 'HK') return 1000;
   return 100;
 }
@@ -110,9 +117,10 @@ async function fetchOneEastmoney(stock) {
       const change = numScale(r.f169, scale);
       const changePercent = pct100(r.f170);
       const name = typeof r.f58 === 'string' && r.f58 ? r.f58 : stock.name;
-      // f59 是东财给的精度（小数位）；拿不到时按品种兜底（基金/可转债 3 位）
+      // 展示精度同样优先 f59，其次 f152，最后按品种兜底（基金/可转债 3 位）
       const f59 = decimalsOf(r.f59);
-      const decimals = f59 !== undefined ? f59 : classifyCode(stock.code).decimals;
+      const f152 = decimalsOf(r.f152);
+      const decimals = f59 !== undefined ? f59 : (f152 !== undefined ? f152 : classifyCode(stock.code).decimals);
       return {
         stockId: stock.id, code: stock.code, name,
         latestPrice: price, changePercent, changeAmount: change,
@@ -143,6 +151,120 @@ async function fetchEastmoney(stocks) {
   return rows;
 }
 
+// ---- K 线 / 分时（东财历史行情，与实时行情同一套 secid 规则） ----
+// klt: 101 日K / 102 周K / 103 月K；fqt=1 前复权；lmt 取最近 N 根。
+// 历史接口的 ut 与实时接口不同，沿用东财公开的常量即可。
+const KLINE_UT = 'f057cbcbce2a86e2866ab8877db1d059';
+const KLINE_PERIODS = { day: 101, week: 102, month: 103 };
+
+// 严格转数字：空串/缺失返回 NaN，避免 Number('')===0 把缺值当成 0
+function toNum(v) {
+  if (v === undefined || v === null || v === '') return NaN;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+async function fetchKline(stock, period = 'day', limit = 160) {
+  const klt = KLINE_PERIODS[period] || 101;
+  const n = Math.min(Math.max(Number(limit) || 160, 30), 800);
+  const secid = encodeURIComponent(eastmoneySecid(stock));
+  // 关键：必须带 end（一个足够远的日期即可），否则东财返回 rc:102 / data:null，
+  // 表现就是「分时能看、日周月K全空」（分时走的是另一个 trends2 接口）
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&klt=${klt}&fqt=1&lmt=${n}&end=20500101&iscca=1`
+    + `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f61&ut=${KLINE_UT}`;
+  const res = await fetchWithTimeout(url, {
+    headers: { Referer: 'https://quote.eastmoney.com/', 'User-Agent': UA },
+  }, 8000);
+  if (!res.ok) throw new Error(`kline http ${res.status}`);
+  const data = await res.json();
+  const d = data && data.data;
+  if (!d || !Array.isArray(d.klines) || !d.klines.length) throw new Error(`无${period === 'day' ? '日' : period === 'week' ? '周' : '月'}K数据`);
+  // 每行：日期,开,收,高,低,量,额,振幅,涨跌幅,换手率（f51..f59,f61）
+  const klines = d.klines.map((line) => {
+    const p = String(line).split(',');
+    return {
+      date: p[0],
+      open: toNum(p[1]), close: toNum(p[2]), high: toNum(p[3]), low: toNum(p[4]),
+      volume: toNum(p[5]), amount: toNum(p[6]), amplitude: toNum(p[7]), changePercent: toNum(p[8]),
+      turnover: toNum(p[9]), // 换手率 %
+    };
+  }).filter((k) => Number.isFinite(k.close) && Number.isFinite(k.open));
+  const dec = decimalsOf(d.decimal);
+  return {
+    code: stock.code,
+    name: d.name || stock.name || stock.code,
+    decimals: dec !== undefined ? dec : classifyCode(stock.code).decimals,
+    klines,
+  };
+}
+
+// 分时：f51 时间, f53 现价, f56 成交量, f58 均价
+async function fetchTrends(stock) {
+  const secid = encodeURIComponent(eastmoneySecid(stock));
+  const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid
+    + `&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f53,f56,f58&iscr=0&iscca=0&ndays=1&ut=${KLINE_UT}`;
+  const res = await fetchWithTimeout(url, {
+    headers: { Referer: 'https://quote.eastmoney.com/', 'User-Agent': UA },
+  }, 8000);
+  if (!res.ok) throw new Error(`trends http ${res.status}`);
+  const data = await res.json();
+  const d = data && data.data;
+  if (!d || !Array.isArray(d.trends) || !d.trends.length) throw new Error('无分时数据');
+  const trends = d.trends.map((line) => {
+    const p = String(line).split(',');
+    return { time: p[0], price: toNum(p[1]), volume: toNum(p[2]), avgPrice: toNum(p[3]) };
+  }).filter((t) => Number.isFinite(t.price));
+  const dec = decimalsOf(d.decimal);
+  return {
+    code: stock.code,
+    name: d.name || stock.name || stock.code,
+    preClose: toNum(d.prePrice),
+    decimals: dec !== undefined ? dec : classifyCode(stock.code).decimals,
+    trends,
+  };
+}
+
+// 单只实时明细：今开/昨收/今高/今低/成交量/成交额/换手率（K线窗口顶部信息条用）
+// f44 高 / f45 低 / f46 开 / f47 成交量(手) / f48 成交额(元) / f60 昨收 / f168 换手率(×100)
+async function fetchStockDetail(stock) {
+  const secid = encodeURIComponent(eastmoneySecid(stock));
+  let lastErr = null;
+  for (const host of EASTMONEY_HOSTS) {
+    const url = `https://${host}/api/qt/stock/get?secid=${secid}&fields=f43,f44,f45,f46,f47,f48,f58,f59,f60,f152,f168,f169,f170`
+      + `&ut=${EASTMONEY_UT}&fltt=1&invt=2&_=${Date.now()}`;
+    try {
+      const res = await fetchWithTimeout(url, {
+        headers: { Referer: 'https://quote.eastmoney.com/', 'User-Agent': UA },
+      }, 6000);
+      if (!res.ok) throw new Error(`detail http ${res.status}`);
+      const data = await res.json();
+      const r = data && data.data;
+      if (!r || r.f43 == null) throw new Error('detail empty data');
+      const scale = scaleFor(stock, r.f59, r.f152);
+      const dec = decimalsOf(r.f59);
+      const dec152 = decimalsOf(r.f152);
+      return {
+        code: stock.code,
+        name: typeof r.f58 === 'string' && r.f58 ? r.f58 : (stock.name || stock.code),
+        latestPrice: numScale(r.f43, scale),
+        preClose: numScale(r.f60, scale),
+        open: numScale(r.f46, scale),
+        high: numScale(r.f44, scale),
+        low: numScale(r.f45, scale),
+        changeAmount: numScale(r.f169, scale),
+        changePercent: pct100(r.f170),
+        volume: toNum(r.f47), // 手
+        amount: toNum(r.f48), // 元
+        turnover: Number.isFinite(toNum(r.f168)) ? toNum(r.f168) / 100 : NaN, // 换手率 %
+        decimals: dec !== undefined ? dec : (dec152 !== undefined ? dec152 : classifyCode(stock.code).decimals),
+      };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('detail failed');
+}
+
 function parseSinaLine(line) {
   const m = line.match(/hq_str_([a-z]{2}\d+)="([^"]*)"/);
   if (!m) return null;
@@ -165,7 +287,6 @@ async function fetchSina(stocks) {
     `https://hq.sinajs.cn/list=${symbols}`,
     `http://hq.sinajs.cn/list=${symbols}`,
   ];
-  let lastErr = null;
   let text = null;
   const errs = [];
   for (const url of urls) {
@@ -178,7 +299,6 @@ async function fetchSina(stocks) {
       text = buf.toString('latin1');
       break;
     } catch (e) {
-      lastErr = e;
       errs.push(`${url.startsWith('https') ? 'https' : 'http'}:${firstLine(e.message)}`);
     }
   }
@@ -221,7 +341,6 @@ async function fetchTencent(stocks) {
     `https://qt.gtimg.cn/q=${symbols}`,
     `http://qt.gtimg.cn/q=${symbols}`,
   ];
-  let lastErr = null;
   let text = null;
   const errs = [];
   for (const url of urls) {
@@ -234,7 +353,6 @@ async function fetchTencent(stocks) {
       text = buf.toString('latin1');
       break;
     } catch (e) {
-      lastErr = e;
       errs.push(`${url.startsWith('https') ? 'https' : 'http'}:${firstLine(e.message)}`);
     }
   }
@@ -256,40 +374,24 @@ async function fetchTencent(stocks) {
   });
 }
 
-// 主入口：三通道并行拉取，按 stockId 合并（谁先 OK 用谁， complementary 补全）
-// 串行降级太慢（东财双 host 超时能卡 16 秒），并行后整体只等最慢的一路
-async function fetchQuotesWithFallback(stocks) {
-  if (!stocks.length) return { rows: [], source: 'empty', errors: [] };
-  const settled = await Promise.allSettled([
-    fetchEastmoney(stocks),
-    fetchSina(stocks),
-    fetchTencent(stocks),
-  ]);
-  const names = ['fetchEastmoney', 'fetchSina', 'fetchTencent'];
-  const errors = [];
-  const byProvider = settled.map((s, i) => {
-    if (s.status === 'fulfilled') {
-      const okCount = s.value.filter((r) => r.ok).length;
-      if (okCount === 0) errors.push(`${names[i]}: no ok rows`);
-      return s.value;
-    }
-    errors.push(`${names[i]}: ${s.reason && s.reason.message ? s.reason.message : s.reason}`);
-    return [];
-  });
-  const now = Date.now();
+// 按 stockId 逐只取第一个 ok 的结果（谁先成功用谁，可相互补全），并记录实际用到的通道。
+// outGroups 与 names 一一对应，索引顺序即优先级。主进程的渐进式合并也复用这个函数，
+// 避免「主进程一套、Provider 一套」两份合并逻辑逐渐漂移。
+const PROVIDER_NAMES = ['eastmoney', 'sina', 'tencent'];
+function mergeQuoteRows(stocks, outGroups, names = PROVIDER_NAMES) {
   const used = new Set();
+  const now = Date.now();
   const rows = stocks.map((s) => {
-    for (let i = 0; i < byProvider.length; i++) {
-      const q = byProvider[i].find((r) => r.stockId === s.id);
+    for (let i = 0; i < outGroups.length; i++) {
+      const q = (outGroups[i] || []).find((r) => r.stockId === s.id);
       if (q && q.ok) {
-        used.add(names[i].replace('fetch', '').toLowerCase());
+        used.add(names[i]);
         return q;
       }
     }
     return { stockId: s.id, code: s.code, name: s.name, ok: false, updatedAt: now };
   });
-  const source = used.size ? [...used].join('+') : 'none';
-  return { rows, source, errors };
+  return { rows, source: used.size ? [...used].join('+') : 'none' };
 }
 
 // ---- 搜索 ----
@@ -716,8 +818,9 @@ module.exports = {
   numScale, pct100, marketFromSuggest, unescapeUnicode, decodeAuto,
   classifyCode, fundKind, securityTypeLabel, typeFromSuggest,
   parseSinaLine, parseTencentLine, parseSmartbox, parseSinaSuggest, parseXueqiuSuggest, directCodeCandidate,
-  fetchEastmoney, fetchSina, fetchTencent,
-  fetchQuotesWithFallback, searchEastmoney, searchTencent, searchSina, searchXueqiu, searchStocks,
+  fetchEastmoney, fetchSina, fetchTencent, mergeQuoteRows,
+  KLINE_PERIODS, fetchKline, fetchTrends, fetchStockDetail,
+  searchEastmoney, searchTencent, searchSina, searchXueqiu, searchStocks,
   selfTest, connectivityTest,
 };
 

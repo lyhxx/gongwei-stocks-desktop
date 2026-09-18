@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>K线</title>
+<link rel="stylesheet" href="./chart.css" />
+</head>
+<body>
+<div class="kline-tabs" id="klineTabs">
+  <button data-period="trend" class="active">分时</button>
+  <button data-period="day">日K</button>
+  <button data-period="week">周K</button>
+  <button data-period="month">月K</button>
+  <span class="kline-title" id="klineTitle"></span>
+</div>
+<div class="kline-info" id="klineInfo"></div>
+<div class="kline-chart-wrap">
+  <div id="klineChart" class="kline-chart"></div>
+  <!-- 主图与成交量副图之间的一行：悬停时显示该点的成交量 -->
+  <div class="vol-label" id="volLabel">成交量</div>
+</div>
+<script src="../vendor/echarts.min.js"></script>
+<script src="./chart.js"></script>
+</body>
+</html>

@@ -102,15 +102,15 @@ async function okAsync(name, fn) {
     assert.strictEqual(P.decodeAuto(Buffer.from('hello茅台', 'utf8')), 'hello茅台');
   });
 
-  console.log('[6] 联调：三通道并行合并（mock fetch）');
+  console.log('[6] 联调：三通道分别取数 + 合并（mock fetch）');
   const realFetch = global.fetch;
-  await okAsync('东财补 A、腾讯补 B，新浪挂掉被记录', async () => {
+  await okAsync('东财补 A、腾讯补 B，新浪挂掉不影响整体', async () => {
     global.fetch = async (url) => {
       const u = String(url);
       if (u.includes('push2')) {
         const secid = (u.match(/secid=([^&]*)/) || [])[1] || '';
         if (secid.includes('600000')) {
-          return { ok: true, status: 200, json: async () => ({ data: { f43: 785, f60: 780, f169: 5, f170: 64, f58: '浦发银行', f59: 2, f152: 2 } }) };
+          return { ok: true, status: 200, json: async () => ({ data: { f43: 785, f60: 780, f169: 5, f170: 64, f58: '浦发银行', f59: 2 } }) };
         }
         return { ok: true, status: 200, json: async () => ({ data: {} }) };
       }
@@ -124,17 +124,107 @@ async function okAsync(name, fn) {
       { id: 'a', code: '600000', name: '浦发银行', market: 'CN', exchange: 'SH' },
       { id: 'b', code: '000001', name: '平安银行', market: 'CN', exchange: 'SZ' },
     ];
-    const { rows, source, errors } = await P.fetchQuotesWithFallback(stocks);
+    // 主进程就是「三通道并行 + mergeQuoteRows 按只合并」，这里用同一套纯函数复现
+    const settled = await Promise.allSettled([
+      P.fetchEastmoney(stocks), P.fetchSina(stocks), P.fetchTencent(stocks),
+    ]);
+    assert.strictEqual(settled[1].status, 'rejected', '新浪应失败');
+    const groups = settled.map((s) => (s.status === 'fulfilled' ? s.value : []));
+    const { rows, source } = P.mergeQuoteRows(stocks, groups);
     assert.strictEqual(rows.length, 2);
     assert.ok(rows.every((r) => r.ok), '两只都应有值');
     assert.ok(source.includes('eastmoney') && source.includes('tencent'), '来源应合并：' + source);
-    assert.ok(errors.some((e) => e.includes('sina')), '新浪报错应被记录');
   });
-  await okAsync('全部通道挂掉', async () => {
+  await okAsync('全部通道挂掉：合并后 ok=false、来源 none', async () => {
     global.fetch = async () => { throw new Error('net down'); };
-    const { rows, source } = await P.fetchQuotesWithFallback([{ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' }]);
+    const stocks = [{ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' }];
+    const settled = await Promise.allSettled([
+      P.fetchEastmoney(stocks), P.fetchSina(stocks), P.fetchTencent(stocks),
+    ]);
+    const groups = settled.map((s) => (s.status === 'fulfilled' ? s.value : []));
+    const { rows, source } = P.mergeQuoteRows(stocks, groups);
     assert.strictEqual(source, 'none');
     assert.strictEqual(rows[0].ok, false);
+  });
+  await okAsync('东财缺 f59 时用 f152 定精度', async () => {
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: { f43: 7850, f60: 7800, f169: 50, f170: 64, f58: 'X', f152: 3 } }) });
+    const [row] = await P.fetchEastmoney([{ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' }]);
+    assert.strictEqual(row.latestPrice, 7.85, '应按 f152=3 除以 1000');
+    assert.strictEqual(row.decimals, 3);
+  });
+  await okAsync('f59/f152 都缺时按 A 股默认除以 100（空值不能被当成 0 位小数）', async () => {
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: { f43: 785, f60: 780, f169: 5, f170: 64, f58: 'X' } }) });
+    const [row] = await P.fetchEastmoney([{ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' }]);
+    assert.strictEqual(row.latestPrice, 7.85, '应按默认 100 换算，而不是除以 1');
+    assert.strictEqual(row.decimals, 2);
+  });
+
+  console.log('[6.5] K 线 / 分时（mock 东财历史接口）');
+  await okAsync('K 线解析：日期/开收高低/量额/涨跌幅', async () => {
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({
+      data: {
+        code: '600000', name: '浦发银行', decimal: 2,
+        klines: [
+          '2026-09-16,10.00,10.50,10.60,9.90,100000,105000000,7.00,5.00,3.21',
+          '2026-09-17,10.50,10.20,10.70,10.10,80000,82000000,5.71,-2.86,2.55',
+        ],
+      },
+    }) });
+    const r = await P.fetchKline({ code: '600000', exchange: 'SH', market: 'CN' }, 'day', 160);
+    assert.strictEqual(r.decimals, 2);
+    assert.strictEqual(r.klines.length, 2);
+    assert.deepStrictEqual(
+      { o: r.klines[0].open, c: r.klines[0].close, h: r.klines[0].high, l: r.klines[0].low },
+      { o: 10, c: 10.5, h: 10.6, l: 9.9 },
+    );
+    assert.strictEqual(r.klines[0].volume, 100000);
+    assert.strictEqual(r.klines[1].changePercent, -2.86);
+    assert.strictEqual(r.klines[0].turnover, 3.21, 'f61 是换手率');
+  });
+  await okAsync('周/月 K 使用 klt=102/103', async () => {
+    let seen = '';
+    global.fetch = async (url) => { seen = String(url); return { ok: true, status: 200, json: async () => ({ data: { decimal: 2, klines: ['2026-09-18,1,1,1,1,1,1,0,0'] } }) }; };
+    await P.fetchKline({ code: '600000', exchange: 'SH' }, 'week');
+    assert.ok(seen.includes('klt=102'), seen);
+    await P.fetchKline({ code: '600000', exchange: 'SH' }, 'month');
+    assert.ok(seen.includes('klt=103'), seen);
+  });
+  await okAsync('K 线空数据要报错', async () => {
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: { klines: [] } }) });
+    let threw = false;
+    try { await P.fetchKline({ code: '600000', exchange: 'SH' }, 'day'); } catch (e) { threw = /K数据/.test(e.message); }
+    assert.ok(threw, '空 klines 应抛错');
+  });
+  await okAsync('K 线请求必须带 end（否则东财返回 rc:102 / 空数据）', async () => {
+    let seen = '';
+    global.fetch = async (url) => { seen = String(url); return { ok: true, status: 200, json: async () => ({ data: { decimal: 2, klines: ['2026-09-18,1,1,1,1,1,1,0,0'] } }) }; };
+    await P.fetchKline({ code: '600000', exchange: 'SH' }, 'day');
+    assert.ok(seen.includes('end='), '缺少 end 会拿不到数据：' + seen);
+  });
+  await okAsync('实时明细解析：今开/昨收/今高/今低/量/额/换手率', async () => {
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: { f43: 907, f44: 915, f45: 900, f46: 905, f47: 517593, f48: 469969405, f58: '浦发银行', f59: 2, f60: 906, f168: 16, f169: 1, f170: 11 } }) });
+    const d = await P.fetchStockDetail({ code: '600000', exchange: 'SH', market: 'CN' });
+    assert.strictEqual(d.open, 9.05);
+    assert.strictEqual(d.preClose, 9.06);
+    assert.strictEqual(d.high, 9.15);
+    assert.strictEqual(d.low, 9.0);
+    assert.strictEqual(d.volume, 517593);
+    assert.strictEqual(d.amount, 469969405);
+    assert.strictEqual(d.turnover, 0.16, 'f168 是换手率×100');
+    assert.strictEqual(d.decimals, 2);
+  });
+  await okAsync('分时解析：prePrice + 价格/量', async () => {
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({
+      data: {
+        code: '600000', name: '浦发银行', decimal: 2, prePrice: 10.00,
+        trends: ['2026-09-17 09:30,10.10,1000,10.10', '2026-09-17 09:31,10.05,1200,10.08'],
+      },
+    }) });
+    const r = await P.fetchTrends({ code: '600000', exchange: 'SH', market: 'CN' });
+    assert.strictEqual(r.preClose, 10);
+    assert.strictEqual(r.trends.length, 2);
+    assert.strictEqual(r.trends[1].price, 10.05);
+    assert.strictEqual(r.trends[0].time, '2026-09-17 09:30');
   });
 
   console.log('[7] 联调：搜索多层兜底（mock fetch）');

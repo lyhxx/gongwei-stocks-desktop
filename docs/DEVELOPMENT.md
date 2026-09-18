@@ -26,15 +26,19 @@
 │  轮询定时器 ─→ providers 三路并行 ─→ 合并 ─→ 广播 market:update     │
 │  告警判定 ─→ 桌面通知 / 声音 / 渲染层高亮                            │
 │  托盘（提示与轮播）· 全局热键 · 浮窗尺寸自适应                        │
-└───────┬───────────────────────────┬────────────────────────────────┘
-        │ preload.js (contextBridge)│
-┌───────▼───────────┐     ┌─────────▼───────────┐
-│ 主窗口 renderer/  │     │ 浮窗 float/          │
-│ index.html+app.js │     │ float.html+float.js  │
-└───────────────────┘     └─────────────────────┘
+└───┬────────────────┬───────────────┬─────────────────────────────┘
+    │ preload.js      │               │
+    │ (contextBridge) │               │
+┌───▼───────────┐ ┌──▼────────────┐ ┌▼───────────────────────┐
+│ 主窗口        │ │ 浮窗 float/    │ │ K线窗口 chart/          │
+│ renderer/     │ │ float.html     │ │ chart.html             │
+│ index.html    │ │ +float.js      │ │ +chart.js (+echarts)   │
+│ +app.js       │ │                │ │                        │
+└───────────────┘ └───────────────┘ └────────────────────────┘
 ```
 
-* **两个窗口共用同一个 `preload.js`**，暴露面收敛在 `window.gongwei`，渲染层没有任何 Node 能力（`contextIsolation: true`、`nodeIntegration: false`）。
+* **三个窗口共用同一个 `preload.js`**，暴露面收敛在 `window.gongwei`，渲染层没有任何 Node 能力（`contextIsolation: true`、`nodeIntegration: false`）。
+* K 线窗口独立于主窗口：主窗口只发 `chart:open`，窗口自己用 `chart:stock` 取当前标的、监听 `chart:update` 切换；这样图表不受主窗口尺寸/滚动限制，可自由缩放。
 * 主窗口关闭 = 隐藏到托盘（`app.quitting` 标记区分真正退出）。
 * 单实例锁：第二次启动会唤醒已有窗口，不会起两个进程。
 
@@ -101,6 +105,25 @@ refreshMarket(reason)
 
 全部失败时若输入是 6 位代码，返回直通候选；否则抛出带各层原因的异常。
 
+### 3.4 K 线 / 分时
+
+自选行点 K 线图标 → `openChart(stock)`（`chart:open`）打开**独立窗口** `chart/` → 窗口启动时 `chart:stock` 取标的、调 `kline:get` / `trends:get` / `detail:get` → 用 ECharts 绘制。**按需请求**：只有打开图表窗口才拉数据，不参与轮询。
+
+| 周期 | 接口 | 关键参数 |
+| --- | --- | --- |
+| 分时 | `push2.eastmoney.com/api/qt/stock/trends2/get` | `ndays=1`，`fields2=f51,f53,f56,f58` |
+| 日K | `push2his.eastmoney.com/api/qt/stock/kline/get` | `klt=101` |
+| 周K | 同上 | `klt=102` |
+| 月K | 同上 | `klt=103` |
+
+* 一律 `fqt=1`（前复权），复用 `eastmoneySecid()` 生成 `secid`。
+* **`kline/get` 必须带 `end` 参数**（取一个足够远的日期，如 `20500101`）。不带 `end` 时东财返回 `rc:102` / `data:null`，表现就是「分时能看、日周月 K 全空」——分时走的是另一个 `trends2` 接口，所以更容易误判成网络问题。
+* K 线每行：`日期,开,收,高,低,量,额,振幅,涨跌幅`。注意 **ECharts `candlestick` 的数据顺序是 `[开, 收, 低, 高]`**（不是 `[开,收,高,低]`，网上不少示例是错的，会让影线上下颠倒）。
+* 顶部明细另走 `push2.eastmoney.com/api/qt/stock/get`（`f44` 高 / `f45` 低 / `f46` 开 / `f47` 量(手) / `f48` 额(元) / `f60` 昨收 / `f168` 换手率(×100)），只在打开窗口时取一次。
+* ECharts 不做打包，`src/vendor/echarts.min.js` 是 vendor 文件；升级时 `npm i -D echarts@5` 后把 `node_modules/echarts/dist/echarts.min.js` 覆盖过去即可，由 `chart/chart.html` 在 `chart.js` 之前引入。
+* 主图与成交量副图用 `axisPointer.link: [{ xAxisIndex: 'all' }]` 联动十字光标；**只让最底部 X 轴显示指针时间标签**（`catAxis(..., false)` 关掉主图那份），否则悬停会出现两个时间。
+* 图表高度靠 flex 占满窗口，`window.resize` 时调 `chart.resize()`；换标的用 `chart:update` 推送，切周期用 `seq` 丢弃过期响应。
+
 ## 4. Provider 层（`src/common/providers.js`）
 ### 4.1 代码 / secid 规则
 
@@ -146,11 +169,15 @@ refreshMarket(reason)
 | `getMarket()` | `market:get` | 取最近行情快照 |
 | `refreshMarket()` | `market:refresh` | 主动刷新 |
 | `search(kw)` | `search` | 五层兜底搜索 |
+| `getKline(stock, period, limit)` | `kline:get` | 日/周/月 K 线（东财 `push2his`） |
+| `getTrends(stock)` | `trends:get` | 当日分时（东财 `trends2`） |
+| `getDetail(stock)` | `detail:get` | 实时明细（今开/昨收/今高/今低/量/额） |
+| `openChart(stock)` | `chart:open` | 打开 K 线独立窗口并载入标的 |
+| `getChartStock()` | `chart:stock` | K 线窗口启动时取当前标的 |
 | `addStock` / `removeStock` | `stocks:add` / `stocks:remove` | 增删自选 |
 | `updateAlert(id, alert)` | `stocks:update-alert` | 提醒条件（合并写入） |
-| `updateStock(id, patch)` | `stocks:update` | 通用字段（`badgeEnabled` 等） |
-| `moveStock(id, dir)` | `stocks:move` | 排序，`dir=-1` 上移 |
 | `snoozeStock(id, min)` | `stocks:snooze` | 暂停提醒 |
+| `reorderStocks(ids)` / `reorderIndices(ids)` | `stocks:reorder` / `indices:reorder` | 拖拽排序落库 |
 | `toggleIndex(id, on)` | `indices:toggle` | **原子**启停指数，避免连点竞态 |
 | `updateSettings(patch)` | `settings:update` | 设置深合并 |
 | `toggleFloat` / `hideFloat` | `float:toggle` / `float:hide` | 浮窗显隐 |
@@ -159,6 +186,11 @@ refreshMarket(reason)
 | `diagnose()` | `diagnose` | 通道状态与报错 |
 | `selftest()` | `selftest` | 九探针并行实测 |
 | `onMarket` / `onStore` / `onAlert` | `market:update` / `store:changed` / `alert:trigger` | 主进程推送 |
+
+另有 `applyProxy()`（`proxy:apply`）、`testProxy()`（`proxy:test`）、`checkUpdate()`（`update:check`）、
+`openExternal(url)`（`open:external`）；单向推送还有 `onSession`（`session:update`）、
+`onOpenSettings`（`ui:open-settings`）、`onUpdateState`（`update:state`）、
+`onChartUpdate`（`chart:update`，主进程通知 K 线窗口换标的）。
 
 新增通道时 **preload 与 main 必须同步改**，否则 `test/audit.js` 会报「注册了但未使用 / 调用了但未注册」。
 

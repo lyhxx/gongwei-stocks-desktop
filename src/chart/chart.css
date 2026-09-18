@@ -1,0 +1,75 @@
+/* 工位看盘 - K 线独立窗口样式（自带主题变量，不依赖主窗口） */
+:root {
+  --up: #d92d20; --down: #079455;
+  --muted: #64748b; --border: #e2e8f0;
+  --bg: #f1f5f9; --card: #ffffff; --text: #1f2937;
+  --accent: #336fff; --accent-soft: #eef2ff; --hover: #f8fafc;
+}
+[data-theme="dark"] {
+  --up: #ff6b61; --down: #34d399;
+  --muted: #8b98ab; --border: #2b3648;
+  --bg: #0f141b; --card: #18202c; --text: #e6edf5;
+  --accent: #5b8cff; --accent-soft: #22314d; --hover: #1f2a3a;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg); color: var(--text);
+  font-family: "Microsoft YaHei", system-ui, sans-serif; font-size: 13px;
+}
+
+/* ---------- 周期切换 ---------- */
+.kline-tabs {
+  flex: none; display: flex; align-items: center; gap: 2px;
+  padding: 6px 12px 0; background: var(--card); border-bottom: 1px solid var(--border);
+}
+.kline-tabs button {
+  border: 1px solid transparent; background: none; border-radius: 8px 8px 0 0;
+  padding: 7px 16px; font-size: 13px; color: var(--muted); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.kline-tabs button:hover { background: var(--hover); color: var(--text); }
+.kline-tabs button.active { color: var(--accent); font-weight: 700; border-bottom-color: var(--accent); }
+.kline-title { margin-left: auto; padding: 0 4px 6px 0; color: var(--muted); font-size: 13px; }
+
+/* ---------- 明细 ---------- */
+.kline-info {
+  flex: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 6px; padding: 10px 12px 0;
+}
+.kline-info .ki {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+  padding: 6px 9px; border-radius: 8px; background: var(--hover); border: 1px solid var(--border);
+}
+.kline-info .ki i { font-style: normal; font-size: 11px; color: var(--muted); }
+.kline-info .ki b {
+  font-size: 13px; font-weight: 700; color: var(--text);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.kline-info .ki b.pct-up { color: var(--up); }
+.kline-info .ki b.pct-down { color: var(--down); }
+.kline-info .ki-err { grid-column: 1 / -1; }
+
+/* ---------- 图表占满剩余高度 ---------- */
+/* 图表容器：尺寸完全由 JS 按容器像素设置（见 sizeChartEl），避免 ECharts 量到偏大的高度把底部顶出窗口 */
+.kline-chart-wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.kline-chart { position: absolute; left: 0; top: 0; }
+/* 主副图之间的一行：成交量（悬停时带数值） */
+.vol-label {
+  position: absolute; left: 74px; top: 66%;
+  font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums; pointer-events: none;
+}
+
+/* ---------- ECharts tooltip 内容 ---------- */
+.kt-date { font-weight: 700; margin-bottom: 3px; }
+.kt-row { line-height: 1.6; }
+.kt-row span { color: var(--muted); }
+.kt-row b { font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 4px; }
+.kt-ma {
+  display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 4px; padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+.kt-ma em { font-style: normal; font-variant-numeric: tabular-nums; }

@@ -3,9 +3,8 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, globalShortcut, s
 const path = require('path');
 const Store = require('electron-store');
 const { INDICES, defaultState } = require('./common/defaults');
-const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest, classifyCode, connectivityTest } = require('./common/providers');
-const { setFetchImpl } = require('./common/http');
-const { fetchWithTimeout } = require('./common/http');
+const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest, classifyCode, connectivityTest, mergeQuoteRows, fetchKline, fetchTrends, fetchStockDetail } = require('./common/providers');
+const { setFetchImpl, fetchWithTimeout } = require('./common/http');
 const { normalizeProxyMode, normalizeProxyRules, describeResolvedProxy } = require('./common/proxy');
 const { isNewer, pickDownloadAsset } = require('./common/version');
 const { describePhase, planTick } = require('./common/market-hours');
@@ -45,7 +44,10 @@ function themeBackground(theme) {
 // Windows 会给它画一圈直角阴影，圆角外面就会露出直角（曾踩过）
 function syncWindowBackground() {
   const bg = themeBackground(effectiveTheme());
-  if (mainWin && !mainWin.isDestroyed()) mainWin.setBackgroundColor(bg);
+  // 只给有系统边框的窗口刷底色（主窗口、K 线窗口）；透明浮窗不能设，否则圆角外露直角
+  for (const w of [mainWin, chartWin]) {
+    if (w && !w.isDestroyed()) w.setBackgroundColor(bg);
+  }
 }
 
 function applyNativeTheme() {
@@ -346,21 +348,6 @@ const QUOTE_PROVIDERS = [
   ['tencent', fetchTencent],
 ];
 
-function mergeQuoteRows(stocks, outs) {
-  const used = new Set();
-  const rows = stocks.map((s) => {
-    for (let i = 0; i < outs.length; i++) {
-      const q = (outs[i] || []).find((r) => r.stockId === s.id);
-      if (q && q.ok) {
-        used.add(QUOTE_PROVIDERS[i][0]);
-        return q;
-      }
-    }
-    return { stockId: s.id, code: s.code, name: s.name, ok: false, updatedAt: Date.now() };
-  });
-  return { rows, source: used.size ? [...used].join('+') : 'none' };
-}
-
 async function doRefreshMarket(reason = 'auto') {
   const gen = ++refreshGen;
   const st = getState();
@@ -450,6 +437,11 @@ async function tick() {
     const changed = plan.info.phase !== sessionInfo.phase || plan.info.day !== sessionInfo.day;
     sessionInfo = plan.info;
     if (changed) broadcastSession();
+  } else if (sessionInfo.phase !== 'always') {
+    // 关掉「仅交易时段请求」后 planTick 不再返回时段信息，这里主动清掉旧状态，
+    // 否则状态栏会一直停在「已收盘 / 午间休市」，看起来像坏了
+    sessionInfo = { phase: 'always', day: '', nextChangeAt: 0 };
+    broadcastSession();
   }
 
   if (plan.action === 'fetch') {
@@ -535,25 +527,53 @@ function floatSize() {
 }
 
 // ---------- 浮窗 ----------
-let floatExpandedHeight = 360; // 展开时的高度（由渲染层回报）
-let floatRevealed = false;     // 是否已经显示过（等渲染层报高度后再显示，避免先出现再跳一下）
+let floatRevealed = false;     // 是否已经显示过
+let floatReady = false;        // 首帧是否已经画完（ready-to-show）
+let floatSized = false;        // 是否已收到过有效的高度回报
+let floatPendingShow = false;  // 已请求渲染层同步、正等它回报高度后再显示
 
 function workArea() {
   return screen.getPrimaryDisplay().workArea;
 }
 
-// 渲染层报完真实高度后才显示：否则窗口会先按初始高度出现、再被缩放，看起来像闪了两次
+function doShowFloat() {
+  if (!floatWin || floatWin.isDestroyed()) return;
+  floatPendingShow = false;
+  floatRevealed = true;
+  if (!floatWin.isVisible()) floatWin.showInactive(); // 不抢焦点，摸鱼时不打断当前操作
+}
+
+// 首次显示要同时满足「首帧已绘制」+「尺寸已定好」再 show，否则会先出现空白/旧尺寸再跳一下
 function revealFloat() {
   if (!floatWin || floatWin.isDestroyed() || floatRevealed) return;
-  floatRevealed = true;
-  floatWin.showInactive(); // 不抢焦点，摸鱼时不打断当前操作
+  if (!(floatReady && floatSized)) return;
+  doShowFloat();
+}
+
+// 显示一个已创建过的浮窗：先让渲染层用最新数据重算高度，等回报到了再 show。
+// 直接在 show 后渲染/缩放会有一次可见跳动；先同步后显示则全程在隐藏状态下完成。
+function showExistingFloat() {
+  if (!floatWin || floatWin.isDestroyed() || floatWin.isVisible()) return;
+  if (!floatRevealed) { revealFloat(); return; } // 首次走 ready-to-show 那套
+  floatPendingShow = true;
+  floatWin.webContents.send('float:sync');
+  // 兜底：渲染层没回（异常）也不能一直不显示
+  setTimeout(() => { if (floatPendingShow) doShowFloat(); }, 120);
+}
+
+// 统一的隐藏入口：顺手取消「等回报再显示」，避免刚请求显示又立刻隐藏时被重新弹出来
+function hideFloatWindow() {
+  floatPendingShow = false;
+  if (floatWin && !floatWin.isDestroyed()) floatWin.hide();
 }
 
 function createFloatWindow() {
   const { w, h } = floatSize();
   const { x, y } = floatPosition(w, h);
-  floatExpandedHeight = h;
   floatRevealed = false;
+  floatReady = false;
+  floatSized = false;
+  floatPendingShow = false;
   floatWin = new BrowserWindow({
     width: w,
     height: h,
@@ -577,9 +597,16 @@ function createFloatWindow() {
     e.preventDefault();
     showFloatMenu();
   });
-  // 兜底：万一渲染层一直没回报高度，也不能让窗口一直不可见
-  setTimeout(() => revealFloat(), 800);
-  floatWin.on('closed', () => { floatWin = null; floatRevealed = false; });
+  floatWin.once('ready-to-show', () => { floatReady = true; revealFloat(); });
+  // 兜底：万一 ready-to-show 没触发或渲染层一直没回报高度，也不能让窗口一直不可见
+  setTimeout(() => { floatReady = true; floatSized = true; revealFloat(); }, 800);
+  floatWin.on('closed', () => {
+    floatWin = null;
+    floatRevealed = false;
+    floatReady = false;
+    floatSized = false;
+    floatPendingShow = false;
+  });
 }
 
 // 浮窗右键菜单
@@ -591,7 +618,7 @@ function showFloatMenu() {
     { label: '显示主窗口', click: () => showMainWindow() },
     { label: '设置…', click: () => { showMainWindow(); if (mainWin) mainWin.webContents.send('ui:open-settings'); } },
     { type: 'separator' },
-    { label: '隐藏浮窗（Ctrl+Shift+M）', click: () => { if (floatWin) floatWin.hide(); } },
+    { label: '隐藏浮窗（Ctrl+Shift+M）', click: () => hideFloatWindow() },
     {
       label: st.settings.floating.enabled ? '停用浮窗' : '启用浮窗',
       click: () => {
@@ -599,10 +626,10 @@ function showFloatMenu() {
         const cur = getState();
         cur.settings.floating.enabled = next;
         store.set(cur);
-        if (!next && floatWin) floatWin.hide();
+        if (!next) hideFloatWindow();
         broadcastStore();
         if (next && (!floatWin || floatWin.isDestroyed())) createFloatWindow();
-        else if (next && floatWin) { floatWin.showInactive(); broadcastMarket(); }
+        else if (next) showExistingFloat();
       },
     },
     { type: 'separator' },
@@ -621,23 +648,55 @@ function showMainWindow() {
 function toggleFloat() {
   if (floatWin && !floatWin.isDestroyed()) {
     if (floatWin.isVisible()) {
-      floatWin.hide();
-    } else if (floatRevealed) {
-      // 先让渲染层把数据/高度更新完再显示，避免显示后被缩放
-      broadcastMarket();
-      floatWin.showInactive();
+      hideFloatWindow();
+      return;
     }
-    // 还没 reveal 过说明刚创建，等它自己显示
-  } else {
-    // 显式点「浮窗」/热键时一律创建并显示（开启开关语义，不只受设置里的 enabled 限制）
-    createFloatWindow();
-    const st = getState();
-    if (!st.settings.floating.enabled) {
-      st.settings.floating.enabled = true;
-      store.set(st);
-    }
+    showExistingFloat();
+    return;
+  }
+  // 显式点「浮窗」/热键时一律创建并显示（开启开关语义，不只受设置里的 enabled 限制）
+  createFloatWindow();
+  const st = getState();
+  if (!st.settings.floating.enabled) {
+    st.settings.floating.enabled = true;
+    store.set(st);
   }
   broadcastStore();
+}
+
+// ---------- K 线独立窗口 ----------
+// 独立 BrowserWindow，避免主窗口尺寸受限、出现滚动条；宽高可自由调整
+let chartWin = null;
+let chartStock = null;
+
+function createChartWindow() {
+  const win = new BrowserWindow({
+    width: 780,
+    height: 560,
+    minWidth: 560,
+    minHeight: 380,
+    title: 'K线',
+    icon: APP_ICON,
+    autoHideMenuBar: true,
+    backgroundColor: themeBackground(effectiveTheme()),
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  });
+  win.loadFile(path.join(__dirname, 'chart', 'chart.html'));
+  win.on('closed', () => { if (chartWin === win) chartWin = null; });
+  return win;
+}
+
+function openChartWindow(stock) {
+  chartStock = stock || null;
+  if (!chartWin || chartWin.isDestroyed()) {
+    chartWin = createChartWindow(); // 页面加载后由 chart.js 主动来取当前股票
+    return;
+  }
+  if (chartWin.isMinimized()) chartWin.restore();
+  chartWin.show();
+  chartWin.focus();
+  // 已加载完就直接推新数据；还在加载则等它自己取
+  if (!chartWin.webContents.isLoading()) chartWin.webContents.send('chart:update', chartStock);
 }
 
 function createTray() {
@@ -648,7 +707,7 @@ function createTray() {
   } catch { /* 用默认空图标兜底 */ }
   tray = new Tray(trayIcon);
   const menu = Menu.buildFromTemplate([
-    { label: '显示主窗口', click: () => { if (!mainWin) createMainWindow(); mainWin.show(); } },
+    { label: '显示主窗口', click: () => showMainWindow() },
     { label: '显示/隐藏浮窗（Ctrl+Shift+M）', click: toggleFloat },
     { type: 'separator' },
     { label: '立即刷新', click: () => refreshMarket('manual') },
@@ -699,7 +758,7 @@ function registerIpc() {
     };
   });
   ipcMain.handle('update:check', () => checkForUpdates());
-  ipcMain.handle('update:state', () => updateState);
+  // 更新状态是主进程单向推送（update:state），渲染层不主动拉取，所以这里不需要 handle
   ipcMain.handle('open:external', (_e, url) => {
     const safe = safeExternalUrl(url);
     if (!safe) throw new Error('只允许打开 github.com 的 https 链接');
@@ -708,6 +767,13 @@ function registerIpc() {
   });
   ipcMain.handle('selftest', () => selfTest());
   ipcMain.handle('search', (_e, keyword) => searchStocks(String(keyword || '').trim(), 10));
+
+  // K 线 / 分时：按前端传回的自选描述（含 secid 线索的 sourceIds）取历史数据
+  ipcMain.handle('kline:get', (_e, { stock, period, limit } = {}) => fetchKline(stock || {}, period, limit));
+  ipcMain.handle('trends:get', (_e, stock) => fetchTrends(stock || {}));
+  ipcMain.handle('detail:get', (_e, stock) => fetchStockDetail(stock || {}));
+  ipcMain.handle('chart:open', (_e, stock) => { openChartWindow(stock); return true; });
+  ipcMain.handle('chart:stock', () => chartStock);
 
   ipcMain.handle('stocks:add', (_e, item) => {
     const st = getState();
@@ -761,34 +827,6 @@ function registerIpc() {
     return s;
   });
 
-  // 通用字段更新：badgeEnabled（是否上浮窗）等
-  ipcMain.handle('stocks:update', (_e, { id, patch }) => {
-    const st = getState();
-    const s = st.stocks.find((x) => x.id === id);
-    if (!s) throw new Error('找不到股票');
-    if (typeof patch.badgeEnabled === 'boolean') s.badgeEnabled = patch.badgeEnabled;
-    if (typeof patch.name === 'string' && patch.name.trim()) s.name = patch.name.trim();
-    st.updatedAt = new Date().toISOString();
-    store.set(st);
-    broadcastStore();
-    return s;
-  });
-
-  // 排序：dir=-1 上移，+1 下移（数组物理换位，order 顺手重排）
-  ipcMain.handle('stocks:move', (_e, { id, dir }) => {
-    const st = getState();
-    const i = st.stocks.findIndex((x) => x.id === id);
-    const j = i + (dir > 0 ? 1 : -1);
-    if (i < 0 || j < 0 || j >= st.stocks.length) return false;
-    const [s] = st.stocks.splice(i, 1);
-    st.stocks.splice(j, 0, s);
-    st.stocks.forEach((x, k) => { x.order = k; });
-    st.updatedAt = new Date().toISOString();
-    store.set(st);
-    broadcastStore();
-    return true;
-  });
-
   // 拖拽排序：前端给出新的 id 顺序，主进程校验后重排
   ipcMain.handle('stocks:reorder', (_e, ids) => {
     const st = getState();
@@ -812,26 +850,28 @@ function registerIpc() {
   });
 
   ipcMain.handle('float:toggle', () => { toggleFloat(); return true; });
-  ipcMain.handle('float:hide', () => { if (floatWin) floatWin.hide(); return true; });
+  ipcMain.handle('float:hide', () => { hideFloatWindow(); return true; });
 
   // 浮窗高度自适应：渲染完后由浮窗回报内容高度，窗口贴合内容
   ipcMain.on('float:resize', (e, rawH) => {
     if (!floatWin || floatWin.isDestroyed() || e.sender !== floatWin.webContents) return;
-    const h = Math.max(80, Math.min(560, Math.round(Number(rawH) || 0)));
-    if (!h) return;
+    const raw = Number(rawH);
+    // 0 / NaN 是渲染中途的无效回报，必须在夹紧之前挡掉：
+    // 否则会被夹到 80px 把窗口先缩小，下一帧再撑开，看起来就是闪一下
+    if (!Number.isFinite(raw) || raw <= 0) return;
+    floatSized = true; // 收到真实高度，首次显示的前提条件之一
+    const h = Math.max(80, Math.min(560, Math.round(raw)));
     const [w, curH] = floatWin.getContentSize();
-    // 首次回报即认为渲染完成：先按真实高度定好尺寸，再显示，避免"出现→跳一下"
-    if (Math.abs(curH - h) <= 2) {
-      revealFloat();
-      return;
+    // 尺寸变化一律在「显示之前」应用：先按真实高度定好，再 show，避免"出现→跳一下"
+    if (Math.abs(curH - h) > 2) {
+      floatWin.setContentSize(w, h);
+      // 只夹紧垂直位置，水平位置保持用户拖到的地方
+      const b = floatWin.getBounds();
+      const wa = workArea();
+      floatWin.setPosition(b.x, Math.min(Math.max(b.y, wa.y), wa.y + wa.height - h));
     }
-    floatExpandedHeight = h;
-    floatWin.setContentSize(w, h);
-    // 只夹紧垂直位置，水平位置保持用户拖到的地方
-    const b = floatWin.getBounds();
-    const wa = workArea();
-    floatWin.setPosition(b.x, Math.min(Math.max(b.y, wa.y), wa.y + wa.height - h));
-    revealFloat();
+    if (floatPendingShow) doShowFloat();
+    else revealFloat();
   });
 
   // 指数拖拽排序：selected 的顺序即展示顺序
@@ -891,11 +931,19 @@ function registerIpc() {
     store.set(st);
     if (patch.network) await applyProxy();
     if (patch.main && 'theme' in patch.main) applyNativeTheme();
-    if (floatWin) {
+    if (floatWin && !floatWin.isDestroyed()) {
       floatWin.setOpacity(Number(st.settings.floating.opacity ?? 88) / 100);
-      const { x, y } = floatPosition(floatWin.getBounds().width, floatWin.getBounds().height);
-      floatWin.setPosition(x, y);
-      if (!st.settings.floating.enabled) floatWin.hide();
+      // 只有「位置/宽度」这类布局设置变了才把浮窗挪回设定角落；
+      // 否则用户把浮窗拖到哪，改一下刷新间隔就被拽回右下角，很恼人
+      const fl = patch.floating || {};
+      if ('position' in fl || 'width' in fl) {
+        const { x, y } = floatPosition(floatWin.getBounds().width, floatWin.getBounds().height);
+        floatWin.setPosition(x, y);
+      }
+      const wasEnabled = !!(old.floating && old.floating.enabled);
+      if (!st.settings.floating.enabled) hideFloatWindow();
+      // 仅当「关→开」时才主动显示：临时隐藏过的浮窗（Esc/热键）不会因保存设置而弹回来
+      else if (!wasEnabled) showExistingFloat();
     } else if (st.settings.floating.enabled) {
       // 之前关掉过浮窗（窗口未创建），这里重新打开设置要能把它建出来
       createFloatWindow();
@@ -914,8 +962,10 @@ function registerIpc() {
 
 function broadcastStore() {
   const st = getState();
-  if (mainWin) mainWin.webContents.send('store:changed', st);
-  if (floatWin) floatWin.webContents.send('store:changed', st);
+  // 与 broadcastMarket 保持一致：窗口销毁瞬间（close 已触发但引用还没置空）send 会抛错
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('store:changed', st);
+  if (floatWin && !floatWin.isDestroyed()) floatWin.webContents.send('store:changed', st);
+  if (chartWin && !chartWin.isDestroyed()) chartWin.webContents.send('store:changed', st);
 }
 
 // 启动时先把指数名单广播出去（不等慢速行情回来，界面秒出中文名）
@@ -939,6 +989,8 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    // 去掉默认应用菜单：否则按 Alt 会弹出原生 File / Edit 菜单条，跟这个托盘小工具不搭
+    Menu.setApplicationMenu(null);
     registerIpc();
     applyNativeTheme(); // 先定好深浅色，再开窗口，免得标题栏先白一下
     // 跟随系统时，Windows 切换深浅色要同步窗口底色（原生标题栏由 nativeTheme 自动跟）

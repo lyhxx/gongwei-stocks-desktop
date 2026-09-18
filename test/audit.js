@@ -8,8 +8,10 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 
 const rendererHtml = read('src/renderer/index.html');
 const floatHtml = read('src/float/float.html');
+const chartHtml = read('src/chart/chart.html');
 const appJs = read('src/renderer/app.js');
 const floatJs = read('src/float/float.js');
+const chartJs = read('src/chart/chart.js');
 const preload = read('src/preload.js');
 const mainJs = read('src/main.js');
 const pkg = JSON.parse(read('package.json'));
@@ -36,10 +38,11 @@ function checkDom(label, html, js) {
 }
 checkDom('renderer', rendererHtml, appJs);
 checkDom('float', floatHtml, floatJs);
+checkDom('chart', chartHtml, chartJs);
 
 // preload 暴露面 ↔ 业务代码调用面
 const exposed = new Set([...preload.matchAll(/^\s{2}([a-zA-Z]\w*):/gm)].map((m) => m[1]));
-for (const [label, js] of [['renderer', appJs], ['float', floatJs]]) {
+for (const [label, js] of [['renderer', appJs], ['float', floatJs], ['chart', chartJs]]) {
   for (const m of js.matchAll(/window\.gongwei\.([a-zA-Z]\w*)/g)) {
     if (!exposed.has(m[1])) problems.push(`${label} 使用了未暴露的 window.gongwei.${m[1]}`);
   }
