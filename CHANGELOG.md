@@ -8,8 +8,37 @@
 
 ### 计划中
 
-- ETF / 场内基金适配、浮窗贴边吸附成小圆圈、应用内检查更新、代理设置、自选拖拽排序
+- K 线 / 分时图、分组管理、持仓盈亏、老板键、数据备份
 - 详见 [README 路线图](README.md#路线图)
+
+## [1.1.0] - 2026-09-18
+
+路线图「近期」五项全部落地。
+
+### 新增
+
+- **网络代理**：设置里可选「跟随系统 / 不使用 / 手动指定」，自动吃到系统代理与 PAC；请求改走 Electron 的 `net.fetch`（Chromium 网络栈），解决部分网络下行情接口全部超时的问题；诊断弹窗新增「代理模式 / 实际走向」
+- **ETF 与场内基金适配**：搜索与自选区分股票 / ETF / LOF / 可转债 / 港美股，自选行显示类型标签；修正 `5xxxxx`（沪市基金）、`11xxxx`/`113xxx`（沪市可转债）被误判为深市的问题；基金与可转债按 3 位小数展示，股票 2 位
+- **浮窗贴边吸附**：拖到屏幕边缘自动贴边，吸附到左右两侧时收起成小球（显示涨跌家数），鼠标移入展开、移出自动收回；双击也可手动收起 / 展开；设置内可关闭
+- **检查更新**：主界面 `⋯ → 检查更新`，也可启动后静默检查（20 小时一次）；发现新版本在页脚显示徽标与更新说明，可打开发布页或直接下载；只允许打开 github.com 的 https 链接
+- **自选拖拽排序**：按住行首 `⠿` 拖动调整顺序，替换原来的 `↑ ↓` 按钮
+
+### 变更
+
+- 行情与搜索请求统一收敛到 `src/common/http.js`，可注入请求实现（应用内为 `net.fetch`，测试里为全局 fetch），静态审计会拦截裸 `fetch(` 调用
+- 搜索主通道腾讯 smartbox 现在接收 `ETF` / `ZQ` 类型，场内基金不再被过滤、无需依赖东财兜底
+
+### 修复
+
+- 腾讯 smartbox 的类型过滤写成 `/^GP/`，导致 ETF 被整体丢弃
+- 纯代码添加时 `5xxxxx` 与 `11xxxx` 一律判为深市
+- 自选价格对基金/可转债统一按 2 位小数显示
+
+### 工程
+
+- 新增 `src/common/http.js`、`proxy.js`、`version.js`、`order.js`、`floatLayout.js`，逻辑与 Electron 解耦，均可单测
+- 测试增至 4 组：打包配置校验 + 静态审计 + Provider（47 项）+ DOM（32 项）
+- DOM 测试框架改为异步用例串行执行，并新增「用例漏跑即报错」的保护
 
 ## [1.0.0] - 2026-09-17
 
@@ -39,5 +68,6 @@
 - GitHub Actions 打 tag 自动构建，产出安装包 / 绿色单文件 / 绿色解压版并发布 Release
 - 老版本配置自动补齐字段（`ensureDefaults` / `normalizeStocks`），避免升级后崩溃
 
-[未发布]: https://github.com/lyhxx/gongwei-stocks-desktop/compare/v1.0.0...HEAD
+[未发布]: https://github.com/lyhxx/gongwei-stocks-desktop/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/lyhxx/gongwei-stocks-desktop/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/lyhxx/gongwei-stocks-desktop/releases/tag/v1.0.0

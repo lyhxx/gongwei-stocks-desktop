@@ -1,9 +1,15 @@
 // 工位看盘 - 主进程
-const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, globalShortcut, screen, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, globalShortcut, screen, nativeImage, net, session, shell } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
 const { INDICES, defaultState } = require('./common/defaults');
-const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest } = require('./common/providers');
+const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest, classifyCode } = require('./common/providers');
+const { setFetchImpl } = require('./common/http');
+const { fetchWithTimeout } = require('./common/http');
+const { normalizeProxyMode, normalizeProxyRules, describeResolvedProxy } = require('./common/proxy');
+const { nearestEdge, snapToEdge, collapsedBounds, canCollapse } = require('./common/floatLayout');
+const { isNewer, pickDownloadAsset } = require('./common/version');
+const { applyOrder } = require('./common/order');
 
 const store = new Store({ name: 'gongwei-stocks', defaults: defaultState() });
 ensureDefaults();
@@ -41,12 +47,24 @@ function ensureDefaults() {
   if (!Array.isArray(raw.stocks)) { raw.stocks = []; changed = true; }
   if (!Array.isArray(raw.groups)) { raw.groups = d.groups; changed = true; }
   if (!raw.settings || typeof raw.settings !== 'object') { raw.settings = d.settings; changed = true; }
-  for (const key of ['main', 'alerts', 'indices', 'floating']) {
+  for (const key of ['main', 'alerts', 'indices', 'floating', 'network', 'update']) {
     const cur = raw.settings[key];
     if (!cur || typeof cur !== 'object' || Array.isArray(cur)) {
       raw.settings[key] = d.settings[key];
       changed = true;
     }
+  }
+  if (!['system', 'direct', 'manual'].includes(raw.settings.network.proxyMode)) {
+    raw.settings.network.proxyMode = d.settings.network.proxyMode;
+    changed = true;
+  }
+  if (typeof raw.settings.network.proxyUrl !== 'string') {
+    raw.settings.network.proxyUrl = '';
+    changed = true;
+  }
+  if (typeof raw.settings.floating.edgeSnap !== 'boolean') {
+    raw.settings.floating.edgeSnap = d.settings.floating.edgeSnap;
+    changed = true;
   }
   if (Array.isArray(raw.settings.indices.selected)) {
     // 只保留已知指数 id，清掉历史脏数据
@@ -92,8 +110,109 @@ function normalizeStocks(st) {
     if (typeof s.order !== 'number') { s.order = i; changed = true; }
     if (!s.exchange) { s.exchange = 'SH'; changed = true; }
     if (!s.market) { s.market = 'CN'; changed = true; }
+    // 品种类型：老数据没有，用代码前缀推断（基金/可转债/股票）
+    if (!s.securityType) { s.securityType = classifyCode(s.code).securityType; changed = true; }
   });
   if (changed) store.set(st);
+}
+
+// ---------- 检查更新 ----------
+const RELEASE_API = 'https://api.github.com/repos/lyhxx/gongwei-stocks-desktop/releases/latest';
+const RELEASE_PAGE = 'https://github.com/lyhxx/gongwei-stocks-desktop/releases/latest';
+let updateState = { checked: false, hasUpdate: false, current: '', latest: '', url: '', notes: '', asset: null, error: '', at: 0 };
+
+// 只允许打开 github.com 的 https 链接，避免被远端数据带偏
+function safeExternalUrl(url) {
+  try {
+    const u = new URL(String(url));
+    if (u.protocol !== 'https:') return '';
+    if (!/(^|\.)github\.com$/.test(u.hostname) && !/(^|\.)githubusercontent\.com$/.test(u.hostname)) return '';
+    return u.toString();
+  } catch {
+    return '';
+  }
+}
+
+async function checkForUpdates() {
+  const current = app.getVersion();
+  try {
+    const res = await fetchWithTimeout(RELEASE_API, {
+      headers: { 'User-Agent': `gongwei-stocks-desktop/${current}`, Accept: 'application/vnd.github+json' },
+    }, 8000);
+    if (!res.ok) throw new Error(`GitHub 返回 ${res.status}`);
+    const rel = await res.json();
+    const latest = String(rel.tag_name || '').replace(/^v/i, '');
+    const hasUpdate = isNewer(latest, current);
+    const asset = pickDownloadAsset(rel);
+    updateState = {
+      checked: true,
+      hasUpdate,
+      current,
+      latest,
+      url: safeExternalUrl(rel.html_url) || RELEASE_PAGE,
+      notes: String(rel.body || '').slice(0, 4000),
+      asset: asset && safeExternalUrl(asset.url) ? asset : null,
+      error: '',
+      at: Date.now(),
+    };
+  } catch (e) {
+    updateState = { ...updateState, checked: true, hasUpdate: false, current, error: e.message, at: Date.now() };
+  }
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('update:state', updateState);
+  return updateState;
+}
+
+// 启动后静默检查一次：距上次超过 20 小时才查，避免每次开都打接口
+function maybeAutoCheckUpdate() {
+  const cfg = (getState().settings.update) || {};
+  if (cfg.autoCheck === false) return;
+  const last = Number(cfg.lastCheckAt || 0);
+  if (Date.now() - last < 20 * 60 * 60 * 1000) return;
+  setTimeout(() => {
+    checkForUpdates().then(() => {
+      const st = getState();
+      st.settings.update = { ...st.settings.update, lastCheckAt: Date.now() };
+      store.set(st);
+      broadcastStore();
+    }).catch(() => { /* 静默失败 */ });
+  }, 8000);
+}
+
+// ---------- 网络代理 ----------
+// 请求统一走 Electron 的 net.fetch（Chromium 网络栈），因此这里只要把 session 的
+// 代理策略设对，行情请求就会自动走系统代理/PAC 或用户手填的代理。
+let proxyStatus = { mode: 'system', resolved: '', error: '' };
+
+async function applyProxy() {
+  const cfg = getState().settings.network || {};
+  const mode = normalizeProxyMode(cfg.proxyMode);
+  const ses = session.defaultSession;
+  try {
+    if (mode === 'direct') {
+      await ses.setProxy({ mode: 'direct' });
+    } else if (mode === 'manual') {
+      const { ok, rules, error } = normalizeProxyRules(cfg.proxyUrl);
+      if (!ok) throw new Error(error);
+      await ses.setProxy({ proxyRules: rules });
+    } else {
+      await ses.setProxy({ mode: 'system' });
+    }
+    // 丢掉旧连接池，避免切换代理后仍复用旧通道
+    if (typeof ses.closeAllConnections === 'function') await ses.closeAllConnections();
+    const resolved = await ses.resolveProxy('https://push2.eastmoney.com');
+    proxyStatus = { mode, resolved, error: '' };
+  } catch (e) {
+    proxyStatus = { mode, resolved: '', error: e.message };
+    // 配置有问题时退回直连，至少不至于完全不可用
+    try { await ses.setProxy({ mode: 'direct' }); } catch { /* 忽略 */ }
+  }
+  return proxyStatus;
+}
+
+async function setupNetwork() {
+  // 让 providers 的请求走 Chromium 网络栈（自带系统代理、PAC、证书处理）
+  setFetchImpl((url, init) => net.fetch(url, init));
+  await applyProxy();
 }
 
 // 纯代码直加时 name 就是 code，行情回来后把真实名称回填（仅当 name 还没被改过时）
@@ -349,9 +468,78 @@ function floatSize() {
   return { w, h };
 }
 
+// ---------- 浮窗贴边吸附 / 收起成小球 ----------
+const FLOAT_SNAP_PX = 20;      // 离边缘多少像素内算贴边
+const FLOAT_BALL_SIZE = 46;    // 收起后的小球尺寸
+let floatEdge = null;          // 当前吸附在哪个边
+let floatCollapsed = false;
+let floatDragTimer = null;
+let floatLayoutBusy = false;   // 自己调 setPosition/setContentSize 时屏蔽 moved 回调
+let floatExpandedHeight = 360; // 展开时的高度（由渲染层回报）
+
+function workArea() {
+  return screen.getPrimaryDisplay().workArea;
+}
+
+function sendFloatState() {
+  if (floatWin && !floatWin.isDestroyed()) {
+    floatWin.webContents.send('float:state', { collapsed: floatCollapsed, edge: floatEdge });
+  }
+}
+
+// 拖动结束后：贴边 + （左右侧）收起成小球
+function settleFloat() {
+  if (!floatWin || floatWin.isDestroyed()) return;
+  if (!getState().settings.floating.edgeSnap) return;
+  const wa = workArea();
+  const b = floatWin.getBounds();
+  const edge = nearestEdge(b, wa, FLOAT_SNAP_PX);
+  floatLayoutBusy = true;
+  try {
+    if (edge) {
+      floatEdge = edge;
+      const { x, y } = snapToEdge(b, wa, edge);
+      floatWin.setPosition(x, y);
+      if (canCollapse(edge) && !floatCollapsed) setFloatCollapsed(true);
+      else if (!canCollapse(edge) && floatCollapsed) setFloatCollapsed(false);
+    } else {
+      // 拖离边缘 = 取消贴边，回到展开态
+      floatEdge = null;
+      if (floatCollapsed) setFloatCollapsed(false);
+    }
+  } finally {
+    setTimeout(() => { floatLayoutBusy = false; }, 60);
+  }
+  sendFloatState();
+}
+
+function setFloatCollapsed(collapsed) {
+  if (!floatWin || floatWin.isDestroyed()) return;
+  const wa = workArea();
+  const b = floatWin.getBounds();
+  if (collapsed) {
+    floatExpandedHeight = b.height;
+    const pos = collapsedBounds(wa, floatEdge || 'right', FLOAT_BALL_SIZE, b.y);
+    floatWin.setContentSize(FLOAT_BALL_SIZE, FLOAT_BALL_SIZE);
+    floatWin.setPosition(pos.x, pos.y);
+    floatCollapsed = true;
+  } else {
+    const { w } = floatSize();
+    const h = Math.max(120, Math.min(560, floatExpandedHeight || 360));
+    const x = floatEdge === 'left' ? wa.x : (floatEdge === 'right' ? wa.x + wa.width - w : b.x);
+    const y = Math.min(Math.max(b.y, wa.y), wa.y + wa.height - h);
+    floatWin.setContentSize(w, h);
+    floatWin.setPosition(x, Math.round(y));
+    floatCollapsed = false;
+  }
+  sendFloatState();
+}
+
 function createFloatWindow() {
   const { w, h } = floatSize();
   const { x, y } = floatPosition(w, h);
+  floatCollapsed = false;
+  floatExpandedHeight = h;
   floatWin = new BrowserWindow({
     width: w,
     height: h,
@@ -368,6 +556,12 @@ function createFloatWindow() {
   });
   floatWin.setOpacity(Number(getState().settings.floating.opacity ?? 88) / 100);
   floatWin.loadFile(path.join(__dirname, 'float', 'float.html'));
+  // 拖动结束（250ms 内没有新的 moved）后再贴边，避免拖动过程中窗口被不断挪走
+  floatWin.on('moved', () => {
+    if (floatLayoutBusy) return;
+    if (floatDragTimer) clearTimeout(floatDragTimer);
+    floatDragTimer = setTimeout(() => { floatDragTimer = null; settleFloat(); }, 250);
+  });
   floatWin.on('closed', () => { floatWin = null; });
 }
 
@@ -427,7 +621,21 @@ function registerIpc() {
     updatedAt: lastQuotes.updatedAt,
     errors: lastQuotes.errors || [],
     stockCount: (getState().stocks || []).length,
+    proxy: {
+      mode: proxyStatus.mode,
+      resolved: describeResolvedProxy(proxyStatus.resolved),
+      error: proxyStatus.error,
+    },
   }));
+  ipcMain.handle('proxy:apply', () => applyProxy());
+  ipcMain.handle('update:check', () => checkForUpdates());
+  ipcMain.handle('update:state', () => updateState);
+  ipcMain.handle('open:external', (_e, url) => {
+    const safe = safeExternalUrl(url);
+    if (!safe) throw new Error('只允许打开 github.com 的 https 链接');
+    shell.openExternal(safe);
+    return true;
+  });
   ipcMain.handle('selftest', () => selfTest());
   ipcMain.handle('search', (_e, keyword) => searchStocks(String(keyword || '').trim(), 10));
 
@@ -444,6 +652,7 @@ function registerIpc() {
       name: String(item.name || code),
       market,
       exchange,
+      securityType: item.securityType || classifyCode(code).securityType,
       sourceIds: item.sourceIds || {},
       order: st.stocks.length,
       badgeEnabled: true,
@@ -510,6 +719,16 @@ function registerIpc() {
     return true;
   });
 
+  // 拖拽排序：前端给出新的 id 顺序，主进程校验后重排
+  ipcMain.handle('stocks:reorder', (_e, ids) => {
+    const st = getState();
+    st.stocks = applyOrder(st.stocks || [], ids);
+    st.updatedAt = new Date().toISOString();
+    store.set(st);
+    broadcastStore();
+    return st.stocks.map((s) => s.id);
+  });
+
   ipcMain.handle('stocks:snooze', (_e, { id, minutes = 30 }) => {
     const st = getState();
     const s = st.stocks.find((x) => x.id === id);
@@ -528,13 +747,52 @@ function registerIpc() {
   // 浮窗高度自适应：渲染完后由浮窗回报内容高度，窗口贴合内容（避免透明区域挡住下方点击）
   ipcMain.on('float:resize', (e, rawH) => {
     if (!floatWin || floatWin.isDestroyed() || e.sender !== floatWin.webContents) return;
+    if (floatCollapsed) return; // 收起成小球时不做高度自适应
     const h = Math.max(80, Math.min(560, Math.round(Number(rawH) || 0)));
     if (!h) return;
     const [w, curH] = floatWin.getContentSize();
     if (Math.abs(curH - h) <= 2) return;
-    floatWin.setContentSize(w, h);
-    const { x, y } = floatPosition(w, h);
-    floatWin.setPosition(x, y);
+    floatExpandedHeight = h;
+    floatLayoutBusy = true;
+    try {
+      floatWin.setContentSize(w, h);
+      const x = floatEdge === 'left'
+        ? workArea().x
+        : (floatEdge === 'right' ? workArea().x + workArea().width - w : floatWin.getBounds().x);
+      const { y } = floatPosition(w, h);
+      floatWin.setPosition(x, floatEdge ? Math.min(Math.max(floatWin.getBounds().y, workArea().y), workArea().y + workArea().height - h) : y);
+    } finally {
+      setTimeout(() => { floatLayoutBusy = false; }, 60);
+    }
+  });
+
+  // 浮窗收起 / 展开（渲染层鼠标移入移出、双击触发）
+  ipcMain.handle('float:collapse', (_e, collapsed) => {
+    if (!floatWin || floatWin.isDestroyed()) return false;
+    if (collapsed && !canCollapse(floatEdge)) return false; // 未贴左右边时不收起
+    setFloatCollapsed(!!collapsed);
+    return true;
+  });
+  ipcMain.handle('float:toggle-collapse', () => {
+    if (!floatWin || floatWin.isDestroyed()) return false;
+    if (!floatCollapsed) {
+      // 手动收起时若没贴边，先贴到离得最近的一侧
+      if (!canCollapse(floatEdge)) {
+        const wa = workArea();
+        const b = floatWin.getBounds();
+        const side = (b.x + b.width / 2) < (wa.x + wa.width / 2) ? 'left' : 'right';
+        floatEdge = side;
+        floatLayoutBusy = true;
+        try {
+          const { x, y } = snapToEdge(b, wa, side);
+          floatWin.setPosition(x, y);
+        } finally { setTimeout(() => { floatLayoutBusy = false; }, 60); }
+      }
+      setFloatCollapsed(true);
+    } else {
+      setFloatCollapsed(false);
+    }
+    return floatCollapsed;
   });
 
   // 指数单选原子切换（主进程单线程读改写，前端连点再快也不丢操作；
@@ -568,7 +826,7 @@ function registerIpc() {
     return st.settings.indices.selected;
   });
 
-  ipcMain.handle('settings:update', (_e, patch) => {
+  ipcMain.handle('settings:update', async (_e, patch) => {
     const st = getState();
     const old = st.settings;
     st.settings = {
@@ -578,9 +836,11 @@ function registerIpc() {
       alerts: { ...old.alerts, ...(patch.alerts || {}) },
       indices: { ...old.indices, ...(patch.indices || {}) },
       floating: { ...old.floating, ...(patch.floating || {}) },
+      network: { ...old.network, ...(patch.network || {}) },
     };
     st.updatedAt = new Date().toISOString();
     store.set(st);
+    if (patch.network) await applyProxy();
     if (floatWin) {
       floatWin.setOpacity(Number(st.settings.floating.opacity ?? 88) / 100);
       const { x, y } = floatPosition(floatWin.getBounds().width, floatWin.getBounds().height);
@@ -628,8 +888,10 @@ if (!gotLock) {
     }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     registerIpc();
+    // 先把网络层准备好（net.fetch + 代理策略），再发第一批行情
+    await setupNetwork();
     createMainWindow();
     if (getState().settings.floating.enabled) createFloatWindow();
     createTray();
@@ -638,6 +900,7 @@ if (!gotLock) {
     startBadgeRotate();
     broadcastIndexMetaNow();
     refreshMarket('init');
+    maybeAutoCheckUpdate();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createMainWindow();

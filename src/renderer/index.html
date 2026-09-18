@@ -19,6 +19,7 @@
       <div id="moreMenu" class="more-menu" hidden>
         <button id="btnOpenSettings">设置</button>
         <button id="btnGoSelftest">接口自检</button>
+        <button id="btnCheckUpdate">检查更新</button>
       </div>
     </div>
   </div>
@@ -43,7 +44,11 @@
   <div id="stocks"></div>
 </section>
 
-<footer>余光一扫，涨跌了然。关闭窗口进托盘，Ctrl+Shift+M 切换浮窗。<br/><span id="appVer"></span></footer>
+<footer>
+  余光一扫，涨跌了然。关闭窗口进托盘，Ctrl+Shift+M 切换浮窗。<br/>
+  <span id="appVer"></span>
+  <span id="updateBadge" class="update-badge" hidden></span>
+</footer>
 
 <div id="modalOverlay" class="modal-overlay" hidden>
   <div class="modal" role="dialog" aria-modal="true">

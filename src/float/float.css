@@ -11,6 +11,25 @@ html, body { margin: 0; background: transparent; font-family: "Microsoft YaHei",
 /* 左侧一条强调色，主界面同款视觉语言 */
 .card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: #336fff; }
 
+/* 收起态：贴边小球。
+   注意 card 上的 ::before 和圆角在小球形态下要去掉，否则会露出方角 */
+.card.collapsed { border-radius: 50%; box-shadow: 0 6px 20px rgba(15, 23, 42, .28); }
+.card.collapsed::before { display: none; }
+.card.collapsed #expanded { display: none; }
+.ball {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; border-radius: 50%;
+  font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums;
+  letter-spacing: .5px; cursor: pointer; user-select: none;
+  background: rgba(241, 245, 249, .96); color: #64748b;
+}
+.ball.up { color: #d92d20; background: rgba(254, 226, 226, .97); }
+.ball.down { color: #079455; background: rgba(209, 250, 229, .97); }
+.ball.flat { color: #64748b; }
+.card[data-theme="dark"] .ball { background: rgba(24, 32, 44, .96); color: #a8b3c2; }
+.card[data-theme="dark"] .ball.up { color: #ff6b61; background: rgba(74, 32, 32, .96); }
+.card[data-theme="dark"] .ball.down { color: #34d399; background: rgba(20, 58, 45, .96); }
+
 /* 顶栏：极简，只放更新时间和涨跌家数 */
 header {
   display: flex; justify-content: space-between; align-items: center;

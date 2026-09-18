@@ -15,19 +15,9 @@ const EASTMONEY_FIELDS = [
 ].join(',');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// 报错信息里只留关键一行，避免诊断区被 URL 淹没
-function firstLine(msg) {
-  return String(msg == null ? 'unknown' : msg).split('\n')[0].slice(0, 120);
-}
-function shortUrl(u) {
-  return String(u).replace(/^https?:\/\//, '').replace(/\?.*$/, '');
-}
-
-function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(new Error(`timeout ${timeoutMs}ms @${shortUrl(url)}`)), timeoutMs);
-  return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(timer));
-}
+// 请求统一走 common/http.js：应用内会被换成 Electron 的 net.fetch（走系统代理/PAC），
+// 单测里则用全局 fetch，两边行为一致
+const { fetchWithTimeout, firstLine } = require('./http');
 
 // ---- 东财数值换算：价格/涨跌额是放大后的整数，需按精度还原 ----
 // f43/f60/f169 是放大后的整数，除以 10^精度（f59/f152，默认 100）
@@ -120,10 +110,14 @@ async function fetchOneEastmoney(stock) {
       const change = numScale(r.f169, scale);
       const changePercent = pct100(r.f170);
       const name = typeof r.f58 === 'string' && r.f58 ? r.f58 : stock.name;
+      // f59 是东财给的精度（小数位）；拿不到时按品种兜底（基金/可转债 3 位）
+      const f59 = decimalsOf(r.f59);
+      const decimals = f59 !== undefined ? f59 : classifyCode(stock.code).decimals;
       return {
         stockId: stock.id, code: stock.code, name,
         latestPrice: price, changePercent, changeAmount: change,
         preClose, open: numScale(r.f46, scale), high: numScale(r.f44, scale), low: numScale(r.f45, scale),
+        decimals,
         ok: Number.isFinite(price), updatedAt: Date.now(),
       };
     } catch (e) {
@@ -201,7 +195,7 @@ async function fetchSina(stocks) {
     return {
       stockId: s.id, code: s.code, name: s.name,
       latestPrice: p.latestPrice, changePercent: p.changePercent,
-      changeAmount: p.changeAmount, ok: true, updatedAt: now,
+      changeAmount: p.changeAmount, decimals: classifyCode(s.code).decimals, ok: true, updatedAt: now,
     };
   });
 }
@@ -257,7 +251,7 @@ async function fetchTencent(stocks) {
     return {
       stockId: s.id, code: s.code, name: s.name,
       latestPrice: p.latestPrice, changePercent: p.changePercent,
-      changeAmount: p.changeAmount, ok: true, updatedAt: now,
+      changeAmount: p.changeAmount, decimals: classifyCode(s.code).decimals, ok: true, updatedAt: now,
     };
   });
 }
@@ -303,29 +297,88 @@ async function fetchQuotesWithFallback(stocks) {
 function unescapeUnicode(s) {
   return String(s || '').replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
+// ---- 品种归类（股票 / 基金 / 可转债 / 指数 / 港美股） ----
+// 用途：1) 纯代码添加时推断交易所（5xxxxx 是沪市基金，11xxxx 是沪市可转债，不能一律当深市）
+//       2) 界面区分 ETF / LOF / 可转债，不把基金当股票看
+//       3) 决定价格小数位（基金、可转债是 3 位）
+const FUND_PREFIX_SH = /^(5)\d{5}$/;            // 50/51/52/53/56/58xxxx 沪市基金
+const FUND_PREFIX_SZ = /^(15|16|18)\d{4}$/;     // 15/16/18xxxx 深市基金
+const BOND_PREFIX_SH = /^(110|111|113|132)\d{3}$/; // 沪市可转债/可交换债
+const BOND_PREFIX_SZ = /^(12)\d{4}$/;           // 123/127/128/120 深市可转债
+
+function classifyCode(code) {
+  const c = String(code || '').trim();
+  if (!/^\d{6}$/.test(c)) return { exchange: 'SH', securityType: 'stock', decimals: 2 };
+
+  if (BOND_PREFIX_SH.test(c)) return { exchange: 'SH', securityType: 'bond', decimals: 3 };
+  if (BOND_PREFIX_SZ.test(c)) return { exchange: 'SZ', securityType: 'bond', decimals: 3 };
+  if (FUND_PREFIX_SH.test(c)) return { exchange: 'SH', securityType: 'fund', decimals: 3 };
+  if (FUND_PREFIX_SZ.test(c)) return { exchange: 'SZ', securityType: 'fund', decimals: 3 };
+
+  if (c.startsWith('6')) return { exchange: 'SH', securityType: 'stock', decimals: 2 };
+  if (c.startsWith('0') || c.startsWith('3')) return { exchange: 'SZ', securityType: 'stock', decimals: 2 };
+  if (c.startsWith('4') || c.startsWith('8') || c.startsWith('9')) return { exchange: 'BJ', securityType: 'stock', decimals: 2 };
+  return { exchange: 'SZ', securityType: 'stock', decimals: 2 };
+}
+
+// ETF 还是 LOF：场外基金被过滤，剩下的场内基金里 16xxxx / 501~506xxx 多为 LOF
+function fundKind(code) {
+  const c = String(code || '');
+  return /^(16\d{4}|(?:501|502|506)\d{3})$/.test(c) ? 'LOF' : 'ETF';
+}
+
+function securityTypeLabel(stock) {
+  const t = (stock && stock.securityType) || 'stock';
+  if (t === 'fund') return fundKind(stock.code);
+  if (t === 'bond') return '债';
+  if (t === 'index') return '指';
+  const mk = stock && stock.market;
+  if (mk === 'HK') return '港';
+  if (mk === 'US') return '美';
+  return '';
+}
+
 // 主通道：腾讯 smartbox（免 token，实测支持代码/名称/拼音缩写，网络兼容最好）
 // 格式：v_hint="sh~600000~浦发银行~pfyh~GP-A^sz~000600~建投能源~jtny~GP-A^..."
-// 条目：market~code~name~pinyin~type（type: GP-A=A股，GP=港/美股，KJ=基金直接过滤）
+// 条目：market~code~name~pinyin~type
+// type 实测取值：GP-A=A股、GP=港/美股、ETF=场内基金、KJ*=场外基金（不可交易，过滤掉）
 function parseSmartbox(text) {
   const m = String(text || '').match(/v_hint="([^"]*)"/);
   if (!m || !m[1]) return [];
   return m[1].split('^').map((entry) => {
     const parts = entry.split('~');
     if (parts.length < 5) return null;
-    const [mk, code, name, , type] = parts;
+    const [mk, code, name, , rawType] = parts;
     if (!code || !name) return null;
-    if (!/^GP/.test(type || '')) return null; // 过滤基金 KJ
+    const type = String(rawType || '').toUpperCase();
+    // 场外基金（KJ*）和场外基金市场（jj）不能交易，直接排除
+    if (mk === 'jj' || type.startsWith('KJ')) return null;
+    // 只收：A/B股、港美股、场内基金、债券/可转债
+    const tradable = type.startsWith('GP') || type === 'ETF' || type === 'LOF' || type.startsWith('ZQ');
+    if (!tradable) return null;
+
     let market = 'CN';
     let exchange = 'SH';
     if (mk === 'sh') { market = 'CN'; exchange = 'SH'; }
-    else if (mk === 'sz') { market = 'CN'; exchange = code.startsWith('8') || code.startsWith('4') || code.startsWith('9') ? 'BJ' : 'SZ'; }
+    else if (mk === 'sz') { market = 'CN'; exchange = 'SZ'; }
     else if (mk === 'bj') { market = 'CN'; exchange = 'BJ'; }
     else if (mk === 'hk') { market = 'HK'; exchange = 'HKEX'; }
     else if (mk === 'us') { market = 'US'; exchange = 'OTHER_US'; }
     else return null;
+
+    let securityType = 'stock';
+    if (type === 'ETF' || type === 'LOF') securityType = 'fund';
+    else if (type.startsWith('ZQ')) securityType = 'bond';
+    if (securityType === 'stock' && market === 'CN') {
+      // 兜底：smartbox 偶尔把基金标成 GP，用代码前缀再核一次
+      securityType = classifyCode(code).securityType;
+    }
+
     const cleanCode = market === 'US' ? code.split('.')[0].toUpperCase() : code;
     const realName = unescapeUnicode(name);
-    return { code: cleanCode, name: realName, market, exchange, label: `${realName} ${cleanCode}`, sourceIds: {} };
+    return {
+      code: cleanCode, name: realName, market, exchange, securityType, label: `${realName} ${cleanCode}`, sourceIds: {},
+    };
   }).filter(Boolean);
 }
 
@@ -368,9 +421,23 @@ async function searchEastmoney(keyword, count = 10) {
     .slice(0, n)
     .map((d) => {
       const { market, exchange } = marketFromSuggest(d);
+      const securityType = typeFromSuggest(d);
       const label = d.Name ? `${d.Name} ${d.Code}` : String(d.Code);
-      return { code: d.Code, name: d.Name || d.Code, market, exchange, label, sourceIds: { eastmoney: d.QuoteID } };
+      return { code: d.Code, name: d.Name || d.Code, market, exchange, securityType, label, sourceIds: { eastmoney: d.QuoteID } };
     });
+}
+
+// 东财 suggest 的品种归类：Classify / SecurityType / SecurityTypeName 任一能看出来即可
+function typeFromSuggest(item) {
+  const c = String(item.Classify || '').toLowerCase();
+  const sn = String(item.SecurityTypeName || '').toLowerCase();
+  const st = String(item.SecurityType || '').toLowerCase();
+  const all = `${c} ${sn} ${st}`;
+  if (all.includes('index') || all.includes('指数')) return 'index';
+  if (all.includes('fund') || all.includes('etf') || all.includes('lof') || all.includes('基金')) return 'fund';
+  if (all.includes('bond') || all.includes('债')) return 'bond';
+  if (all.includes('usstock') || all.includes('美股') || all.includes('hk') || all.includes('港股')) return 'stock';
+  return 'stock';
 }
 
 // 第三通道：新浪 suggest（免 token，支持代码/名称/拼音）
@@ -387,7 +454,8 @@ function parseSinaSuggest(text) {
     const code = symbol.slice(2);
     const exchange = symbol.startsWith('sh') ? 'SH' : (symbol.startsWith('bj') ? 'BJ' : 'SZ');
     if (!name || !code) continue;
-    out.push({ code, name, market: 'CN', exchange, label: `${name} ${code}`, sourceIds: {} });
+    // 新浪 suggest 的品种字段不统一，用代码前缀兜底判定
+    out.push({ code, name, market: 'CN', exchange, securityType: classifyCode(code).securityType, label: `${name} ${code}`, sourceIds: {} });
   }
   return out;
 }
@@ -443,7 +511,8 @@ function parseXueqiuSuggest(data) {
     const code = m[1] === 'US' ? m[2].split('.')[0] : m[2];
     const name = it.name || it.code || code;
     if (!code) continue;
-    out.push({ code, name, market, exchange: exMap[m[1]] || 'SH', label: `${name} ${code}`, sourceIds: {} });
+    const securityType = market === 'CN' ? classifyCode(code).securityType : 'stock';
+    out.push({ code, name, market, exchange: exMap[m[1]] || 'SH', securityType, label: `${name} ${code}`, sourceIds: {} });
   }
   return out;
 }
@@ -572,15 +641,13 @@ async function selfTest() {
   return { at: Date.now(), results };
 }
 
-// 纯 6 位代码直通：不依赖任何搜索接口，直接按前缀规则构造候选
-// 6→SH，0/3→SZ，4/8/9→BJ
+// 纯 6 位代码直通：不依赖任何搜索接口，按代码前缀推断交易所与品种
+// 6→沪股，0/3→深股，4/8/9→北交所，5→沪市基金，15/16/18→深市基金，110/113→沪债，12→深债
 function directCodeCandidate(keyword) {
   const code = String(keyword || '').trim();
   if (!/^\d{6}$/.test(code)) return null;
-  let exchange = 'SZ';
-  if (code.startsWith('6')) exchange = 'SH';
-  else if (code.startsWith('8') || code.startsWith('4') || code.startsWith('9')) exchange = 'BJ';
-  return { code, name: code, market: 'CN', exchange, label: `${code}（直接添加）`, sourceIds: {} };
+  const { exchange, securityType } = classifyCode(code);
+  return { code, name: code, market: 'CN', exchange, securityType, label: `${code}（直接添加）`, sourceIds: {} };
 }
 
 // 搜索总入口：腾讯 -> 东财 -> 新浪 -> 雪球 -> 纯代码直通，五层兜底
@@ -612,8 +679,10 @@ module.exports = {
   EASTMONEY_UT,
   eastmoneySecid, tencentSymbol, sinaSymbol,
   numScale, pct100, marketFromSuggest, unescapeUnicode, decodeAuto,
+  classifyCode, fundKind, securityTypeLabel, typeFromSuggest,
   parseSinaLine, parseTencentLine, parseSmartbox, parseSinaSuggest, parseXueqiuSuggest, directCodeCandidate,
   fetchEastmoney, fetchSina, fetchTencent,
   fetchQuotesWithFallback, searchEastmoney, searchTencent, searchSina, searchXueqiu, searchStocks,
   selfTest,
 };
+

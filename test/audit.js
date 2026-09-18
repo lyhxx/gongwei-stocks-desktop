@@ -53,7 +53,7 @@ for (const c of invoked) if (!channels.has(c)) problems.push(`preload 调用但�
 
 // 版本 / 文档一致性
 if (!readme.includes('CHANGELOG.md')) problems.push('README 未链接到 CHANGELOG.md');
-if (pkg.version !== '1.0.0') problems.push(`版本应为 1.0.0，当前 ${pkg.version}`);
+if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) problems.push(`package.json 版本号不是 x.y.z：${pkg.version}`);
 const changelog = read('CHANGELOG.md');
 if (!new RegExp(`^##\\s+\\[?v?${pkg.version.replace(/\./g, '\\.')}\\]?`, 'm').test(changelog)) {
   problems.push(`CHANGELOG.md 缺少 ${pkg.version} 的版本段落（CI 发版会因此失败）`);
@@ -78,6 +78,12 @@ for (const [label, js] of [['renderer', appJs], ['float', floatJs]]) {
 }
 if (/nodeIntegration\s*:\s*true/.test(mainJs)) problems.push('main.js 开启了 nodeIntegration');
 if (/contextIsolation\s*:\s*false/.test(mainJs)) problems.push('main.js 关闭了 contextIsolation');
+
+// 请求必须走 common/http.js 统一出口，否则换成 net.fetch 后代理会失效
+const providers = read('src/common/providers.js');
+if (/(?<![\w.])fetch\s*\(/.test(providers.replace(/fetchWithTimeout\s*\(/g, ''))) {
+  problems.push('providers.js 里有裸 fetch( 调用，应统一用 common/http.js 的 fetchWithTimeout（否则代理不生效）');
+}
 
 // 指数 id ↔ 前端中文名映射必须一一对应（漏一个界面就显示英文 id）
 const defaults = require(path.join(root, 'src/common/defaults.js'));

@@ -43,6 +43,17 @@ function defaultSettings() {
       position: 'bottom-right',
       hotkey: 'Ctrl+Shift+M',
       escapeToHideEnabled: true,
+      // 贴边吸附：拖到屏幕边缘自动贴边，左右两侧会收起成小球，鼠标移入展开
+      edgeSnap: true,
+    },
+    network: {
+      // system=跟随系统代理（默认，能自动吃到代理软件/PAC）；direct=直连；manual=手动填地址
+      proxyMode: 'system',
+      proxyUrl: '',
+    },
+    update: {
+      autoCheck: true,
+      lastCheckAt: 0,
     },
   };
 }

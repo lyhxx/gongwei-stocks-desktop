@@ -81,6 +81,21 @@ h2::before { content: ""; width: 3px; height: 13px; border-radius: 2px; backgrou
 .hint { color: var(--muted); font-size: 11px; margin: 0 0 8px; line-height: 1.6; }
 .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 14px 0; line-height: 1.8; }
 footer { text-align: center; color: var(--muted); font-size: 11px; padding: 12px 12px 18px; line-height: 1.7; }
+.update-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 10px;
+  font-size: 11px; font-weight: 700; cursor: pointer;
+  color: #fff; background: var(--accent);
+}
+.update-badge[hidden] { display: none; }
+.update-badge:hover { filter: brightness(1.1); }
+.update-notes {
+  max-height: 220px; overflow-y: auto; margin: 8px 0;
+  padding: 8px 9px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--hover); color: var(--muted);
+  font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+.update-actions { display: flex; gap: 6px; }
+.update-actions button { flex: 1; }
 
 /* ---------- 顶栏 ---------- */
 .top {
@@ -169,7 +184,20 @@ footer { text-align: center; color: var(--muted); font-size: 11px; padding: 12px
 .stock.compact:last-child { margin-bottom: 0; }
 .srow { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .srow .name { flex: 1; min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drag-handle {
+  flex: none; cursor: grab; color: var(--scroll-thumb); font-size: 13px;
+  padding: 0 2px; user-select: none; line-height: 1;
+}
+.drag-handle:hover { color: var(--accent); }
+.stock.dragging { opacity: .75; border-color: var(--accent); box-shadow: 0 6px 18px rgba(15, 23, 42, .18); }
+body.dragging-active { user-select: none; cursor: grabbing; }
+body.dragging-active .drag-handle { cursor: grabbing; }
 .srow .name small { color: var(--muted); font-weight: 400; margin-left: 5px; font-size: 11px; }
+.type-badge {
+  font-style: normal; font-size: 10px; font-weight: 700; margin-left: 5px;
+  padding: 0 4px; border-radius: 4px; vertical-align: 1px;
+  color: var(--accent); background: var(--accent-soft);
+}
 .srow .price { font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; flex: none; }
 .pill { font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 20px; flex: none; font-variant-numeric: tabular-nums; }
 .pct-up { color: var(--up); font-weight: 700; }
@@ -226,10 +254,15 @@ body.modal-open { overflow: hidden; }
 /* 设置表单 */
 .settings label { display: flex; align-items: center; gap: 6px; margin: 9px 0; font-size: 12px; }
 .settings input[type=number] { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; width: 130px; background: var(--input); color: var(--text); }
+.settings input[type=text] { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; width: 150px; background: var(--input); color: var(--text); }
 .settings input:focus, .settings select:focus { outline: none; border-color: var(--accent); }
 .settings input[type=checkbox] { accent-color: var(--accent); }
 .settings-test { display: flex; gap: 6px; margin: 12px 0 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
 .settings-test button { flex: 1; }
+.settings-group { margin: 12px 0 0; padding-top: 10px; border-top: 1px dashed var(--border); }
+.settings-group > label:first-child { margin-top: 0; }
+.settings-group #proxyUrlRow[hidden] { display: none; }
+.settings-group #setProxyUrl { width: 170px; }
 
 /* 诊断提示 */
 .diag-hint { margin: 0 0 10px; padding: 8px 9px; border-radius: 7px; background: var(--accent-soft); color: var(--text); }

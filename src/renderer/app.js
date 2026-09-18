@@ -14,6 +14,24 @@ function quoteOf(stockId) {
     || market.indexQuotes.find((q) => q.stockId === stockId);
 }
 
+// 品种标签：股票不显示，基金/可转债/港美股给个小标记，避免把 ETF 当股票看
+function typeLabel(item) {
+  if (!item) return '';
+  const t = item.securityType || 'stock';
+  if (t === 'fund') return /^(16\d{4}|(?:501|502|506)\d{3})$/.test(item.code) ? 'LOF' : 'ETF';
+  if (t === 'bond') return '债';
+  if (t === 'index') return '指';
+  if (item.market === 'HK') return '港';
+  if (item.market === 'US') return '美';
+  return '';
+}
+
+// 价格小数位：优先用行情给的精度（东财 f59），否则按品种兜底
+function fmtQuotePrice(q, fallback = 2) {
+  if (!q || !q.ok || !Number.isFinite(q.latestPrice)) return '--';
+  return q.latestPrice.toFixed(Number.isInteger(q.decimals) ? q.decimals : fallback);
+}
+
 async function boot() {
   state = await window.gongwei.getStore();
   market = await window.gongwei.getMarket();
@@ -23,6 +41,7 @@ async function boot() {
   renderAll();
   window.gongwei.onMarket((m) => { market = m; updateMarketUI(); });
   window.gongwei.onStore((s) => { state = s; renderAll(); });
+  window.gongwei.onUpdateState((u) => renderUpdateBadge(u));
   window.gongwei.onAlert((p) => {
     const channels = state.settings.alerts.channels || [];
     if (channels.includes('sound')) beep();
@@ -42,6 +61,7 @@ async function boot() {
   const closeMore = () => { $('moreMenu').hidden = true; };
   $('btnOpenSettings').onclick = () => { closeMore(); openSettings(); };
   $('btnGoSelftest').onclick = () => { closeMore(); openSelftest(); };
+  $('btnCheckUpdate').onclick = () => { closeMore(); checkUpdate(); };
   $('modalClose').onclick = closeModal;
   $('modalOverlay').addEventListener('mousedown', (e) => {
     if (e.target === $('modalOverlay')) closeModal();
@@ -178,7 +198,7 @@ function updateStocksQuotes() {
     const pct = hasQ ? q.changePercent : 0;
     const priceEl = el.querySelector('.price');
     const pillEl = el.querySelector('.pill');
-    if (priceEl) priceEl.textContent = hasQ ? fmt(q.latestPrice) : '--';
+    if (priceEl) priceEl.textContent = fmtQuotePrice(q);
     if (pillEl) {
       pillEl.textContent = hasQ ? `${pct >= 0 ? '+' : ''}${fmt(pct)}%` : '--';
       pillEl.classList.toggle('pct-up', pct >= 0);
@@ -255,10 +275,15 @@ async function showDiagnose() {
   const errs = (d.errors && d.errors.length ? d.errors : ['各通道暂无报错'])
     .map((e) => `<div class="diag-err">${escapeHtml(e)}</div>`).join('');
   const hint = diagnoseHint(d);
+  const px = d.proxy || {};
+  const pxMode = { system: '跟随系统', direct: '不使用', manual: '手动' }[px.mode] || px.mode || '-';
   openModal('诊断', '', `
     <div class="diag-row"><span>行情来源</span><strong>${escapeHtml(d.source || 'none')}</strong></div>
     <div class="diag-row"><span>更新时间</span><strong>${d.updatedAt ? new Date(d.updatedAt).toLocaleString('zh-CN') : '无'}</strong></div>
     <div class="diag-row"><span>自选数量</span><strong>${d.stockCount}只</strong></div>
+    <div class="diag-row"><span>代理模式</span><strong>${escapeHtml(pxMode)}</strong></div>
+    <div class="diag-row"><span>实际走向</span><strong>${escapeHtml(px.resolved || '未知')}</strong></div>
+    ${px.error ? `<div class="diag-err">代理配置有问题：${escapeHtml(px.error)}</div>` : ''}
     <div class="diag-errs">${errs}</div>
     ${hint ? `<p class="hint diag-hint">${escapeHtml(hint)}</p>` : ''}
     <button id="btnCopyDiagnose">复制结果</button>`);
@@ -294,23 +319,44 @@ function openSettings() {
     <label>刷新间隔（秒，最小2） <input id="setInterval" type="number" min="2" max="60" step="1" /></label>
     <label>浮窗透明度 <input id="setOpacity" type="number" min="30" max="100" step="1" /></label>
     <label><input id="setFloatEnabled" type="checkbox" /> 启用浮窗</label>
+    <label><input id="setEdgeSnap" type="checkbox" /> 浮窗拖到屏幕边缘自动贴边收成小球</label>
     <label><input id="setNotify" type="checkbox" /> 桌面通知提醒</label>
     <label><input id="setSound" type="checkbox" /> 声音提醒</label>
+    <div class="settings-group">
+      <label>网络代理 <select id="setProxyMode">
+        <option value="system">跟随系统</option>
+        <option value="direct">不使用</option>
+        <option value="manual">手动指定</option>
+      </select></label>
+      <label id="proxyUrlRow">代理地址 <input id="setProxyUrl" type="text" placeholder="http://127.0.0.1:7890" /></label>
+      <p class="hint" id="proxyHint"></p>
+    </div>
     <div class="settings-test">
       <button id="btnTestSound">测试声音</button>
       <button id="btnTestNotify">测试通知</button>
     </div>
     <button id="btnSaveSettings" class="primary">保存设置</button>`);
   fillSettings(true);
+  const syncProxyRow = () => {
+    const manual = $('setProxyMode').value === 'manual';
+    $('proxyUrlRow').hidden = !manual;
+    $('proxyHint').textContent = manual
+      ? '填代理软件里的 HTTP / SOCKS5 地址，保存后立即生效'
+      : ($('setProxyMode').value === 'system'
+        ? '自动使用 Windows 系统代理与 PAC，代理软件开启时通常选这个'
+        : '直连，不走任何代理');
+  };
+  $('setProxyMode').onchange = syncProxyRow;
+  syncProxyRow();
   $('btnTestSound').onclick = () => beep();
   $('btnTestNotify').onclick = async () => {
     const r = await window.gongwei.testNotify();
     toast(r && r.ok === false ? (r.message || '通知发送失败') : '通知已发送，看看右下角', 3000);
   };
   $('btnSaveSettings').onclick = async () => {
-    await saveSettings();
+    const { proxyError } = await saveSettings();
     closeModal();
-    toast('设置已保存');
+    toast(proxyError ? `代理未生效：${proxyError}` : '设置已保存', proxyError ? 5000 : 2200);
   };
 }
 function openSelftest() {
@@ -323,6 +369,117 @@ function openSelftest() {
     <div id="selftestResult"></div>`);
   $('btnSelftest').onclick = runSelftest;
   $('btnCopySelftest').onclick = copySelftest;
+}
+
+// ---- 检查更新 ----
+function renderUpdateBadge(u) {
+  const el = $('updateBadge');
+  if (!el) return;
+  if (u && u.hasUpdate) {
+    el.hidden = false;
+    el.textContent = `发现新版本 v${u.latest}`;
+    el.onclick = () => showUpdateModal(u);
+  } else {
+    el.hidden = true;
+    el.textContent = '';
+  }
+}
+
+function showUpdateModal(u) {
+  const rows = [
+    `<div class="diag-row"><span>当前版本</span><strong>v${escapeHtml(u.current)}</strong></div>`,
+    `<div class="diag-row"><span>最新版本</span><strong>v${escapeHtml(u.latest)}</strong></div>`,
+  ].join('');
+  const notes = u.notes
+    ? `<pre class="update-notes">${escapeHtml(u.notes.split('\n').slice(0, 40).join('\n'))}</pre>`
+    : '';
+  openModal('发现新版本', '', `
+    ${rows}
+    ${notes}
+    <div class="update-actions">
+      <button id="btnOpenRelease" class="primary">打开发布页</button>
+      <button id="btnOpenDownload" ${u.asset ? '' : 'hidden'}>直接下载</button>
+    </div>`);
+  $('btnOpenRelease').onclick = () => window.gongwei.openExternal(u.url);
+  if (u.asset) {
+    $('btnOpenDownload').onclick = () => window.gongwei.openExternal(u.asset.url);
+  }
+}
+
+async function checkUpdate() {
+  const el = $('updateBadge');
+  if (el) { el.hidden = false; el.textContent = '正在检查更新…'; el.onclick = null; }
+  let u;
+  try {
+    u = await window.gongwei.checkUpdate();
+  } catch (e) {
+    if (el) { el.hidden = true; el.textContent = ''; }
+    toast(`检查更新失败：${e.message}`, 4000);
+    return;
+  }
+  renderUpdateBadge(u);
+  if (u.error) { toast(`检查更新失败：${u.error}`, 4000); return; }
+  if (u.hasUpdate) showUpdateModal(u);
+  else toast(`已是最新版本 v${u.current}`, 2500);
+}
+
+// ---- 拖拽排序 ----
+// 指针事件实现：按住行首 ⠿ 拖动，实时把被拖行插到目标位置，松手后把新顺序写回主进程
+let dragState = null;
+
+function attachDrag(div, stock) {
+  const handle = div.querySelector('.drag-handle');
+  if (!handle) return;
+  handle.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragState = { id: stock.id, div, handle, pointerId: e.pointerId, moved: false };
+    div.classList.add('dragging');
+    document.body.classList.add('dragging-active');
+    try { handle.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+    handle.addEventListener('pointermove', onDragMove);
+    handle.addEventListener('pointerup', onDragEnd);
+    handle.addEventListener('pointercancel', onDragEnd);
+  });
+}
+
+function onDragMove(e) {
+  if (!dragState) return;
+  dragState.moved = true;
+  const box = $('stocks');
+  const others = [...box.querySelectorAll('.stock:not(.dragging)')];
+  const y = e.clientY;
+  let target = null;
+  for (const row of others) {
+    const rect = row.getBoundingClientRect();
+    if (y < rect.top + rect.height / 2) { target = row; break; }
+  }
+  // 直接搬 DOM，视觉上跟手；松手后再落库
+  if (target) box.insertBefore(dragState.div, target);
+  else box.appendChild(dragState.div);
+}
+
+function onDragEnd() {
+  if (!dragState) return;
+  const { div, handle, id, moved, pointerId } = dragState;
+  handle.removeEventListener('pointermove', onDragMove);
+  handle.removeEventListener('pointerup', onDragEnd);
+  handle.removeEventListener('pointercancel', onDragEnd);
+  try { handle.releasePointerCapture(pointerId); } catch { /* 忽略 */ }
+  div.classList.remove('dragging');
+  document.body.classList.remove('dragging-active');
+  dragState = null;
+  if (!moved) return; // 只是点了一下，不算排序
+
+  const ids = [...$('stocks').querySelectorAll('.stock')].map((el) => el.getAttribute('data-stock'));
+  window.gongwei.reorderStocks(ids)
+    .then(async () => { state = await window.gongwei.getStore(); renderAll(); })
+    .catch(async (err) => {
+      toast(`排序失败：${err.message}`, 3000);
+      state = await window.gongwei.getStore();
+      renderAll();
+    });
+  void id;
 }
 
 // toast：替代原生 alert，不阻塞、不打断盯盘
@@ -371,10 +528,12 @@ function renderStocks() {
     const div = document.createElement('div');
     div.className = 'stock compact';
     div.setAttribute('data-stock', s.id);
+    const tl = typeLabel(s);
     div.innerHTML = `
       <div class="srow">
-        <span class="name" title="${escapeHtml(s.code)}">${escapeHtml(s.name)}<small>${escapeHtml(s.code)}</small></span>
-        <span class="price">${hasQ ? fmt(q.latestPrice) : '--'}</span>
+        <span class="drag-handle" title="按住拖动排序">⠿</span>
+        <span class="name" title="${escapeHtml(s.code)}">${escapeHtml(s.name)}<small>${escapeHtml(s.code)}</small>${tl ? `<i class="type-badge">${tl}</i>` : ''}</span>
+        <span class="price">${fmtQuotePrice(q)}</span>
         <span class="pill ${up ? 'pct-up' : 'pct-down'}">${hasQ ? `${pct >= 0 ? '+' : ''}${fmt(pct)}%` : '--'}</span>
         <button class="icon-btn bell ${!a.enabled ? 'off' : (snoozed ? 'snooze' : 'on')}" data-act="bell" title="${!a.enabled ? '开启价格提醒' : (snoozed ? '提醒已暂停，点击恢复' : '关闭价格提醒')}">🔔</button>
         <button class="icon-btn chev" data-act="chev" title="展开条件设置">›</button>
@@ -416,16 +575,7 @@ function renderStocks() {
       ops.appendChild(b);
       return b;
     };
-    mkBtn('↑ 上移', async () => {
-      await window.gongwei.moveStock(s.id, -1);
-      state = await window.gongwei.getStore();
-      renderAll();
-    }, idx === 0 ? 'hide' : '');
-    mkBtn('↓ 下移', async () => {
-      await window.gongwei.moveStock(s.id, 1);
-      state = await window.gongwei.getStore();
-      renderAll();
-    }, idx === total - 1 ? 'hide' : '');
+    attachDrag(div, s);
     mkBtn('保存条件', async () => {
       const patch = {};
       div.querySelectorAll('input[data-k]').forEach((inp) => {
@@ -527,7 +677,8 @@ function paintSuggest() {
   suggestItems.forEach((it, i) => {
     const div = document.createElement('div');
     div.className = 'suggest-item' + (i === suggestActive ? ' active' : '');
-    div.innerHTML = `<strong>${escapeHtml(it.name)}</strong><span class="code">${escapeHtml(it.code)}</span><span class="ex">${escapeHtml(it.exchange || '')}</span>`;
+    const tl = typeLabel(it);
+    div.innerHTML = `<strong>${escapeHtml(it.name)}</strong><span class="code">${escapeHtml(it.code)}</span><span class="ex">${tl ? `${tl} · ` : ''}${escapeHtml(it.exchange || '')}</span>`;
     div.onmousedown = (e) => { e.preventDefault(); pickSuggest(i); };
     box.appendChild(div);
   });
@@ -592,8 +743,12 @@ function fillSettings(force) {
   $('setInterval').value = state.settings.main.refreshIntervalSeconds;
   $('setOpacity').value = state.settings.floating.opacity;
   $('setFloatEnabled').checked = !!state.settings.floating.enabled;
+  if ($('setEdgeSnap')) $('setEdgeSnap').checked = state.settings.floating.edgeSnap !== false;
   $('setNotify').checked = (state.settings.alerts.channels || []).includes('notify');
   $('setSound').checked = (state.settings.alerts.channels || []).includes('sound');
+  const net = state.settings.network || {};
+  if ($('setProxyMode')) $('setProxyMode').value = net.proxyMode || 'system';
+  if ($('setProxyUrl')) $('setProxyUrl').value = net.proxyUrl || '';
 }
 
 async function saveSettings() {
@@ -602,11 +757,22 @@ async function saveSettings() {
   if ($('setSound').checked) channels.push('sound');
   await window.gongwei.updateSettings({
     main: { theme: $('setTheme').value || 'system', refreshIntervalSeconds: Math.max(2, Number($('setInterval').value) || 3) },
-    floating: { opacity: Number($('setOpacity').value) || 88, enabled: $('setFloatEnabled').checked },
+    floating: {
+      opacity: Number($('setOpacity').value) || 88,
+      enabled: $('setFloatEnabled').checked,
+      edgeSnap: $('setEdgeSnap') ? $('setEdgeSnap').checked : true,
+    },
     alerts: { channels },
+    network: {
+      proxyMode: $('setProxyMode') ? $('setProxyMode').value : 'system',
+      proxyUrl: $('setProxyUrl') ? $('setProxyUrl').value.trim() : '',
+    },
   });
   state = await window.gongwei.getStore();
+  // 代理配置错误时主进程会退回直连并记录原因，返回给调用方决定怎么提示
+  const proxyError = await window.gongwei.applyProxy().then((s) => (s && s.error) || '').catch(() => '');
   renderAll();
+  return { proxyError };
 }
 
 function beep() {

@@ -8,13 +8,15 @@
 
 | 项 | 选择 | 说明 |
 | --- | --- | --- |
-| 运行时 | Electron 33 | 主进程 Node 22 / 渲染进程 Chromium |
+| 运行时 | Electron 33 | 主进程 Node 20 / 渲染进程 Chromium |
+| HTTP | Electron `net.fetch` | Chromium 网络栈，天然走系统代理 / PAC |
 | 持久化 | `electron-store` 8 | 主进程唯一写入口，落盘 JSON |
 | 打包 | `electron-builder` 25 | 一次产出 nsis / portable / zip |
 | 测试 | Node + `jsdom` | 无框架，纯 `assert`，离线可跑 |
 | 目标平台 | 仅 Windows x64 | 浮窗、托盘、热键按 Windows 调优 |
 
 刻意不引入前端框架与打包器：渲染层是原生 ES + CSS，改完直接生效，方便长期单独维护。
+也不引入 `undici` 等代理依赖——Electron 33 内置 Node 20.18，undici 6.28+ 会因 `webidl.util.markAsUncloneable` 直接 `require` 失败，用 `net.fetch` + `session.setProxy` 更省事且能吃到 PAC。
 
 ## 2. 进程与窗口模型
 
@@ -37,6 +39,18 @@
 * 单实例锁：第二次启动会唤醒已有窗口，不会起两个进程。
 
 ## 3. 数据流
+
+### 3.0 公共模块一览
+
+与 Electron 解耦、可单独单测的小模块，改动它们请同步补 `test/providers.test.js`：
+
+| 文件 | 职责 |
+| --- | --- |
+| `common/http.js` | 统一请求出口，可注入实现，带超时 |
+| `common/proxy.js` | 代理模式兜底、手工代理地址校验、`resolveProxy` 结果转人话 |
+| `common/version.js` | 版本号解析比较、从 Release 里挑下载资产 |
+| `common/order.js` | 自选排序校验与重排（拖拽落库前调用） |
+| `common/floatLayout.js` | 浮窗贴边吸附的几何计算（最近边、贴边坐标、小球坐标） |
 
 ### 3.1 行情轮询
 
@@ -73,7 +87,6 @@ setInterval(refreshMarket)            // 间隔取自 settings.main.refreshInter
 全部失败时若输入是 6 位代码，返回直通候选；否则抛出带各层原因的异常。
 
 ## 4. Provider 层（`src/common/providers.js`）
-
 ### 4.1 代码 / secid 规则
 
 | 目标 | 规则 | 示例 |
@@ -169,7 +182,10 @@ setInterval(refreshMarket)            // 间隔取自 settings.main.refreshInter
 * **指数列表以勾选为准**：`renderIndices()` 遍历 `settings.indices.selected` 生成卡片，行情只负责填数值。曾经以行情数组为准，导致取消/新增指数要等下一次网络刷新才生效（网络失败时永远不生效）。
 * **管理面板不跟随轮询重绘**：只在打开和勾选时手动画，否则复选框每几秒重建，点不动。
 * **`hidden` 必须真的不显示**：`.foo { display: grid }` 会盖掉浏览器默认的 `[hidden]`，所以 `styles.css` 里有全局 `[hidden] { display: none !important }`，并且每个声明了 `display` 又用 `hidden` 控制的类都补了 `.foo[hidden]`；`test/audit.js` 会静态检查这一点。
-* **弹窗**：设置 / 自检 / 诊断共用一个 `#modalOverlay`，`openModal(title, bodyClass, html)` 渲染，遮罩点击、`✕`、`Esc` 均可关闭。
+* **弹窗**：设置 / 自检 / 诊断 / 更新共用一个 `#modalOverlay`，`openModal(title, bodyClass, html)` 渲染，遮罩点击、`✕`、`Esc` 均可关闭。
+* **拖拽排序**：指针事件 + `setPointerCapture`，拖动过程中直接搬 DOM（跟手），松手后把新的 id 顺序交给 `stocks:reorder` 校验落库；`getBoundingClientRect` 在 jsdom 里恒为 0，测试里表现为「拖到末尾」。
+* **浮窗两种形态**：展开（`#expanded`）与收起小球（`#ball`），由主进程 `float:state` 事件驱动切 class；小球形态下不做高度自适应，也不渲染列表内容。
+* **请求一律走 `common/http.js`**：`test/audit.js` 会拦截 `providers.js` 里的裸 `fetch(`，否则换成 `net.fetch` 后代理就不生效了。
 
 ## 8. 构建与发布
 
@@ -248,4 +264,7 @@ npm test
 * **提醒每 5 分钟可能重复触发** — 有意设计：条件持续满足期间按冷却周期提醒，避免一次性错过
 * **产物文件名必须是 ASCII** — GitHub Release 会抹掉非 ASCII 字符，导致 `-1.0.0-.-x64.exe` 这种废名；`validate-build-config.js` 已加静态拦截
 * **Release 只由 `action-gh-release` 发布** — `npm run dist` 带 `--publish never`，避免 electron-builder 与 action 各发一次导致资产重复、说明被清空
+* **不要引入 `undici` 做代理** — Electron 33 内置 Node 20.18，`require('undici')`（6.28+）直接抛 `webidl.util.markAsUncloneable is not a function`；ProxyAgent 也不能跨版本喂给全局 fetch。用 `net.fetch` + `session.setProxy`
+* **浮窗收起/展开靠程序化 `setContentSize`** — `resizable:false` 的无边框透明窗口在 Windows 上仍可被程序缩放（已实测 46×46 ↔ 250×360）
+* **搜索主通道 smartbox 的类型字段** — A股是 `GP-A`、港美股是 `GP`、场内基金是 `ETF`、场外基金是 `KJ*`（`jj` 市场），早期只放行 `/^GP/` 会把 ETF 全部丢掉
 
