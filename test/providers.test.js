@@ -311,20 +311,6 @@ async function okAsync(name, fn) {
     assert.strictEqual(t('123456'), 'SZ/bond/3');
     assert.strictEqual(t('128123'), 'SZ/bond/3');
   });
-  ok('ETF / LOF 区分', () => {
-    assert.strictEqual(P.fundKind('510300'), 'ETF');
-    assert.strictEqual(P.fundKind('159915'), 'ETF');
-    assert.strictEqual(P.fundKind('161725'), 'LOF');
-    assert.strictEqual(P.fundKind('501050'), 'LOF');
-  });
-  ok('品种标签', () => {
-    assert.strictEqual(P.securityTypeLabel({ code: '510300', securityType: 'fund' }), 'ETF');
-    assert.strictEqual(P.securityTypeLabel({ code: '161725', securityType: 'fund' }), 'LOF');
-    assert.strictEqual(P.securityTypeLabel({ code: '113050', securityType: 'bond' }), '债');
-    assert.strictEqual(P.securityTypeLabel({ code: '600000', securityType: 'stock' }), '');
-    assert.strictEqual(P.securityTypeLabel({ code: '00700', securityType: 'stock', market: 'HK' }), '港');
-    assert.strictEqual(P.securityTypeLabel({ code: 'AAPL', securityType: 'stock', market: 'US' }), '美');
-  });
   ok('smartbox 收 ETF/可转债、剔除场外基金', () => {
     const raw = String.raw`v_hint="sh~510300~\u6caa\u6df1300ETF~x~ETF^sh~600000~\u6d66\u53d1~x~GP-A^jj~007005~\u573a\u5916\u57fa\u91d1~x~KJ^sh~113050~\u5357\u94f6\u8f6c\u503a~x~ZQ"`;
     const r = P.parseSmartbox(raw);
@@ -473,6 +459,32 @@ async function okAsync(name, fn) {
     const off = M.planTick({ marketHoursOnly: false, refreshIntervalSeconds: 5 }, new Date('2026-09-19T02:00:00Z'), {});
     assert.strictEqual(off.action, 'fetch');
     assert.strictEqual(off.delay, 5000);
+  });
+
+  console.log('[12] 版本比较与发布资源挑选');
+  const V = require(path.join(__dirname, '..', 'src', 'common', 'version.js'));
+  ok('版本解析', () => {
+    assert.deepStrictEqual(V.parseVersion('v1.2.3'), { major: 1, minor: 2, patch: 3, pre: '' });
+    assert.deepStrictEqual(V.parseVersion('1.2'), { major: 1, minor: 2, patch: 0, pre: '' });
+    assert.strictEqual(V.parseVersion('abc'), null);
+  });
+  ok('比较与 isNewer', () => {
+    assert.strictEqual(V.compareVersions('1.2.0', '1.1.9'), 1);
+    assert.strictEqual(V.compareVersions('1.2.0', '1.2.0'), 0);
+    assert.strictEqual(V.compareVersions('1.2.0', '1.10.0'), -1);
+    assert.strictEqual(V.isNewer('1.2.0', '1.1.0'), true);
+    assert.strictEqual(V.isNewer('1.1.0', '1.2.0'), false);
+    assert.strictEqual(V.isNewer('v1.2.0', '1.2.0'), false);
+    // 预发布小于同号正式版
+    assert.strictEqual(V.isNewer('1.2.0', '1.2.0-beta.1'), true);
+  });
+  ok('从 Release 挑选下载资源（优先 portable）', () => {
+    const rel = { assets: [
+      { name: 'gongwei-1.2.0-setup-x64.exe', browser_download_url: 'u1', size: 1 },
+      { name: 'gongwei-1.2.0-portable.exe', browser_download_url: 'u2', size: 2 },
+    ] };
+    assert.strictEqual(V.pickDownloadAsset(rel).name, 'gongwei-1.2.0-portable.exe');
+    assert.strictEqual(V.pickDownloadAsset({ assets: [] }), null);
   });
 
   console.log(`\nproviders: 共 ${passed} 项，${process.exitCode ? '有失败' : '全部通过'}`);

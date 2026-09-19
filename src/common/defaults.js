@@ -58,6 +58,24 @@ function defaultSettings() {
   };
 }
 
+// 单只自选的提醒条件默认值（新增字段时改这里，main 会据此补齐老数据）
+function blankAlert() {
+  return {
+    enabled: false,
+    upperPrice: null,        // 上破价
+    lowerPrice: null,        // 下跌价
+    upperChangePercent: null, // 涨幅 %
+    lowerChangePercent: null, // 跌幅 %
+    limitUp: false,          // 涨停提醒
+    limitDown: false,        // 跌停提醒
+    volumeAnomaly: false,    // 成交量异动（量比）
+    volumeRatio: 2,          // 量比阈值
+    rapidEnabled: false,     // N 分钟急涨急跌
+    rapidPercent: 3,         // 幅度阈值 %
+    rapidMinutes: 5,         // 时间窗口（分钟）
+  };
+}
+
 function defaultState() {
   return {
     schemaVersion: 1,
@@ -68,4 +86,4 @@ function defaultState() {
   };
 }
 
-module.exports = { INDICES, defaultSettings, defaultState };
+module.exports = { INDICES, defaultSettings, defaultState, blankAlert };

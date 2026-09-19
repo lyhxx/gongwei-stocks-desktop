@@ -235,24 +235,14 @@ body.dragging-active .drag-handle { cursor: grabbing; }
 .icon-btn:disabled { opacity: .3; cursor: default; }
 .icon-btn.bell { padding: 2px 5px; display: inline-flex; align-items: center; }
 .icon-btn.bell svg { display: block; }
-/* 关闭：灰色虚线铃 + 斜杠；开启：主色实心铃；暂停：橙色实心铃 */
+/* 关闭：灰色虚线铃 + 斜杠；开启：主色实心铃 */
 .icon-btn.bell.off { color: var(--muted); opacity: .75; }
 .icon-btn.bell.on { color: var(--accent); }
-.icon-btn.bell.snooze { color: #f59e0b; }
-.icon-btn.chev { font-size: 15px; padding: 1px 7px; transition: transform .15s ease; }
-.icon-btn.chev.open { transform: rotate(90deg); }
 .icon-btn.chart { padding: 2px 5px; display: inline-flex; align-items: center; color: var(--muted); }
 .icon-btn.chart svg { display: block; }
 .icon-btn.chart:hover:not(:disabled) { color: var(--accent); }
-
-div.aconfig { margin-top: 7px; border-top: 1px dashed var(--border); padding-top: 7px; }
-div.aconfig[hidden] { display: none; }
-/* 用 minmax(0,1fr) 而不是 1fr：否则输入框的固有最小宽度会把网格撑破，出现横向滚动条 */
-.alert-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-.alert-grid label { font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.alert-grid input { width: 100%; min-width: 0; padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; background: var(--input); color: var(--text); }
-.alert-grid input:focus { outline: none; border-color: var(--accent); }
-.stock .ops { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+/* 行尾图标统一靠右成组 */
+.row-actions { display: inline-flex; align-items: center; gap: 2px; flex: none; margin-left: 2px; }
 
 /* ---------- 弹窗（设置 / 自检 / 诊断） ---------- */
 body.modal-open { overflow: hidden; }
@@ -280,13 +270,6 @@ body.modal-open { overflow: hidden; }
 .modal-body { padding: 12px 13px; overflow-y: auto; }
 .modal-overlay[hidden] { display: none; }
 .modal-body .primary { margin-top: 4px; }
-
-/* 设置表单 */
-.settings label { display: flex; align-items: center; gap: 6px; margin: 9px 0; font-size: 12px; }
-.settings input[type=number] { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; width: 130px; background: var(--input); color: var(--text); }
-.settings input[type=text] { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; width: 150px; background: var(--input); color: var(--text); }
-.settings input:focus, .settings select:focus { outline: none; border-color: var(--accent); }
-.settings input[type=checkbox] { accent-color: var(--accent); }
 
 /* ---------- 设置页：分组 + 行式布局 ---------- */
 .modal-body.settings { padding: 0; }

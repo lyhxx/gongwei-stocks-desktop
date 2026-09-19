@@ -1,6 +1,6 @@
 {
   "name": "gongwei-stocks-desktop",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "工位看盘 - 隐蔽轻量的 Windows 桌面股票行情提醒助手",
   "productName": "工位看盘",
   "main": "src/main.js",
@@ -15,7 +15,7 @@
   "author": "lyhxx",
   "scripts": {
     "start": "electron .",
-    "test": "node scripts/validate-build-config.js && node test/audit.js && node test/providers.test.js && node test/dom.test.js",
+    "test": "node scripts/validate-build-config.js && node test/audit.js && node test/providers.test.js && node test/alerts.test.js && node test/dom.test.js",
     "release:notes": "node scripts/release-notes.js",
     "dist": "electron-builder --win --publish never",
     "dist:dir": "electron-builder --win --dir",

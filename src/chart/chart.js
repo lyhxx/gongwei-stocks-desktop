@@ -108,23 +108,21 @@ function dateLabel(c, vs, ve) {
   };
 }
 
-// 取「整齐」步长（1/2/5 × 10^n），保证刻度值是整数好看
-function niceStep(raw) {
-  if (!(raw > 0)) return 1;
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const n = raw / mag;
-  const nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
-  return nice * mag;
+// 板块涨跌停幅度（主板 10%、创业/科创 20%、北交所 30%；港美股不限）
+function limitFracOf(s) {
+  if (!s || s.market !== 'CN') return 0;
+  const c = String(s.code || '');
+  if (/^(30|68)/.test(c)) return 0.2;
+  if (/^(4|8|9)/.test(c)) return 0.3;
+  return 0.1;
 }
 
-// 以 base 为中轴、上下对称且刻度整齐的区间。返回固定 step，
-// 左右两条轴共用它，刻度才能一一对齐（否则两条轴各自取整会错位，出现顶在一起的两个刻度）
-function symmetricNice(base, half, intervals = 4) {
+// 以 base 为中轴、上下对称的区间（不做取整外扩）。
+// 左右两条轴共用同一个 step，刻度严格对齐，且上/下沿正好是 half（分时就是板块涨跌停）。
+function symmetricExtent(base, half, intervals = 4) {
   const b = Number.isFinite(base) && base ? base : 1;
-  const h = half > 0 ? half : Math.abs(b) * 0.1;
-  const step = niceStep((h * 2) / intervals);
-  const k = Math.max(1, Math.ceil(h / step));
-  return { base: b, min: b - k * step, max: b + k * step, step };
+  const h = half > 0 ? half : Math.abs(b) * 0.02;
+  return { base: b, min: b - h, max: b + h, step: (h * 2) / intervals };
 }
 
 // 右侧涨跌幅轴：与左侧价格轴共用同一段 min/max/interval，只把刻度翻译成相对基准的百分比
@@ -158,9 +156,9 @@ function klineVisibleExtent(klines, zoom) {
   const lo = Math.min(...vis.map((k) => k.low));
   const hi = Math.max(...vis.map((k) => k.high));
   const base = (lo + hi) / 2;
-  // 默认至少 ±10%，可见振幅更大时按实际放大
-  const half = Math.max(base * 0.1, hi - base, base - lo);
-  return symmetricNice(base, half, 4);
+  // 默认至少「一个板块涨跌停」，可见振幅更大时按实际放大
+  const half = Math.max(base * limitFracOf(stock), hi - base, base - lo);
+  return symmetricExtent(base, half, 4);
 }
 
 function zoomSlider(c, start, end) {
@@ -273,8 +271,11 @@ function renderTrendsChart(data) {
   const vols = data.trends.map((t, i) => ({ value: t.volume, itemStyle: { color: t.price >= (i ? data.trends[i - 1].price : pre) ? c.up : c.down } }));
   // 分时右侧涨跌幅轴固定以昨收为中轴：默认 ±10%（涨跌停），若当日振幅超过 10% 再按实际放大，
   // 这样 0% 永远在正中间，顶部 +10.00%、底部 -10.00%（超出时如 +20.00%）
-  const halfFrac = Math.max(0.1, Math.max(Math.abs(Math.max(...prices) - pre), Math.abs(pre - Math.min(...prices))) / (pre || 1));
-  const ext = symmetricNice(pre, pre * halfFrac, 4);
+  // 涨跌幅轴上下沿正好是板块涨跌停（主板 ±10%、创业/科创 ±20%、北交所 ±30%），
+  // 当日振幅更大（新股等）才放大；港美股无涨跌停，至少 ±10% 便于观察
+  const dev = Math.max(Math.abs(Math.max(...prices) - pre), Math.abs(pre - Math.min(...prices))) / (pre || 1);
+  const halfFrac = Math.max(limitFracOf(stock) || 0.1, dev);
+  const ext = symmetricExtent(pre, pre * halfFrac, 4);
   const timeLabel = {
     color: c.muted, fontSize: 10,
     // 整点 + 开盘/午休/收盘几个关键点；首尾（09:30 / 收盘）强制显示

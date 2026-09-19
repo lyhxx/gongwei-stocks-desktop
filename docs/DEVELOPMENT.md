@@ -26,19 +26,20 @@
 │  轮询定时器 ─→ providers 三路并行 ─→ 合并 ─→ 广播 market:update     │
 │  告警判定 ─→ 桌面通知 / 声音 / 渲染层高亮                            │
 │  托盘（提示与轮播）· 全局热键 · 浮窗尺寸自适应                        │
-└───┬────────────────┬───────────────┬─────────────────────────────┘
-    │ preload.js      │               │
-    │ (contextBridge) │               │
-┌───▼───────────┐ ┌──▼────────────┐ ┌▼───────────────────────┐
-│ 主窗口        │ │ 浮窗 float/    │ │ K线窗口 chart/          │
-│ renderer/     │ │ float.html     │ │ chart.html             │
-│ index.html    │ │ +float.js      │ │ +chart.js (+echarts)   │
-│ +app.js       │ │                │ │                        │
-└───────────────┘ └───────────────┘ └────────────────────────┘
+└───┬────────────┬───────────┬───────────┬──────────────────────┐
+    │ preload.js │           │           │
+    │            │           │           │
+┌───▼────────┐ ┌─▼─────────┐ ┌▼──────────┐ ┌▼─────────────────┐
+│ 主窗口     │ │ 浮窗      │ │ K线窗口   │ │ 提醒窗口 alert/   │
+│ renderer/  │ │ float/    │ │ chart/    │ │ alert.html        │
+│ index.html │ │ float.html│ │ chart.html│ │ +alert.js         │
+│ +app.js    │ │ +float.js │ │ +echarts  │ │                  │
+└────────────┘ └───────────┘ └───────────┘ └──────────────────┘
 ```
 
-* **三个窗口共用同一个 `preload.js`**，暴露面收敛在 `window.gongwei`，渲染层没有任何 Node 能力（`contextIsolation: true`、`nodeIntegration: false`）。
+* **四个窗口共用同一个 `preload.js`**，暴露面收敛在 `window.gongwei`，渲染层没有任何 Node 能力（`contextIsolation: true`、`nodeIntegration: false`）。
 * K 线窗口独立于主窗口：主窗口只发 `chart:open`，窗口自己用 `chart:stock` 取当前标的、监听 `chart:update` 切换；这样图表不受主窗口尺寸/滚动限制，可自由缩放。
+* 提醒窗口同理：主窗口只发 `alert:open`，窗口用 `alert:stock` 取标的、监听 `alert:update`；改动防抖即时保存（`stocks:update-alert`），行内不再展开配置。
 * 主窗口关闭 = 隐藏到托盘（`app.quitting` 标记区分真正退出）。
 * 单实例锁：第二次启动会唤醒已有窗口，不会起两个进程。
 
@@ -122,7 +123,25 @@ refreshMarket(reason)
 * 顶部明细另走 `push2.eastmoney.com/api/qt/stock/get`（`f44` 高 / `f45` 低 / `f46` 开 / `f47` 量(手) / `f48` 额(元) / `f60` 昨收 / `f168` 换手率(×100)），只在打开窗口时取一次。
 * ECharts 不做打包，`src/vendor/echarts.min.js` 是 vendor 文件；升级时 `npm i -D echarts@5` 后把 `node_modules/echarts/dist/echarts.min.js` 覆盖过去即可，由 `chart/chart.html` 在 `chart.js` 之前引入。
 * 主图与成交量副图用 `axisPointer.link: [{ xAxisIndex: 'all' }]` 联动十字光标；**只让最底部 X 轴显示指针时间标签**（`catAxis(..., false)` 关掉主图那份），否则悬停会出现两个时间。
+* **分时右侧涨跌幅轴**上下沿正好是「板块涨跌停」（主板 ±10%、创业/科创 ±20%、北交所 ±30%，`limitFracOf()`），以昨收为中轴；当日振幅超过涨跌停（新股等）才放大。**不要对区间取整**——曾把 ±10% 取整外扩成 ±10.81%。左右两轴共用同一 `interval`，刻度严格对齐。
+* 日/周/月 K 的右侧轴相对「可见区间中点」，默认也至少一个涨跌停幅度，随缩放联动（`dataZoom` 事件里重算）。
 * 图表高度靠 flex 占满窗口，`window.resize` 时调 `chart.resize()`；换标的用 `chart:update` 推送，切周期用 `seq` 丢弃过期响应。
+
+### 3.5 价格提醒
+
+条件存在每只自选的 `alert` 对象里（见默认值 `common/defaults.js` 的 `blankAlert()`），提醒窗口改动即时写入。判定在 `main.js` 的 `checkAlerts()`：
+
+| 条件 | 字段 | 判定 |
+| --- | --- | --- |
+| 上破价 / 下跌价 | `upperPrice` / `lowerPrice` | 现价 ≥ / ≤ 阈值 |
+| 涨幅 / 跌幅 | `upperChangePercent` / `lowerChangePercent` | 涨跌幅 ≥ / ≤ ∓ 阈值 |
+| 涨跌停 | `limitUp` / `limitDown` | 涨跌幅接近板块幅度（主板 10%、创业/科创 20%、北交所 30%） |
+| 成交量异动 | `volumeAnomaly` / `volumeRatio` | 东财「量比」(f50) ≥ 阈值 |
+| N 分钟急涨急跌 | `rapidEnabled` / `rapidPercent` / `rapidMinutes` | 相对 N 分钟前采样价涨跌幅 ≥ 阈值 |
+
+* 量比来自东财实时接口 `f50`（×100）；新浪/腾讯通道没有该字段，缺失时不触发。
+* 急涨急跌靠主进程维护的内存采样 `priceHistory`（每只保留 120 分钟），删自选时一并清理。
+* 同一只 5 分钟冷却一次，避免每轮询重复轰炸；`reason !== 'init'` 才通知。
 
 ## 4. Provider 层（`src/common/providers.js`）
 ### 4.1 代码 / secid 规则
@@ -174,9 +193,10 @@ refreshMarket(reason)
 | `getDetail(stock)` | `detail:get` | 实时明细（今开/昨收/今高/今低/量/额） |
 | `openChart(stock)` | `chart:open` | 打开 K 线独立窗口并载入标的 |
 | `getChartStock()` | `chart:stock` | K 线窗口启动时取当前标的 |
+| `openAlert(stock)` | `alert:open` | 打开价格提醒窗口并载入标的 |
+| `getAlertStock()` | `alert:stock` | 提醒窗口启动时取当前标的 |
 | `addStock` / `removeStock` | `stocks:add` / `stocks:remove` | 增删自选 |
 | `updateAlert(id, alert)` | `stocks:update-alert` | 提醒条件（合并写入） |
-| `snoozeStock(id, min)` | `stocks:snooze` | 暂停提醒 |
 | `reorderStocks(ids)` / `reorderIndices(ids)` | `stocks:reorder` / `indices:reorder` | 拖拽排序落库 |
 | `toggleIndex(id, on)` | `indices:toggle` | **原子**启停指数，避免连点竞态 |
 | `updateSettings(patch)` | `settings:update` | 设置深合并 |
@@ -190,7 +210,7 @@ refreshMarket(reason)
 另有 `applyProxy()`（`proxy:apply`）、`testProxy()`（`proxy:test`）、`checkUpdate()`（`update:check`）、
 `openExternal(url)`（`open:external`）；单向推送还有 `onSession`（`session:update`）、
 `onOpenSettings`（`ui:open-settings`）、`onUpdateState`（`update:state`）、
-`onChartUpdate`（`chart:update`，主进程通知 K 线窗口换标的）。
+`onChartUpdate`（`chart:update`，主进程通知 K 线窗口换标的）、`onAlertUpdate`（`alert:update`，提醒窗口换标的）。
 
 新增通道时 **preload 与 main 必须同步改**，否则 `test/audit.js` 会报「注册了但未使用 / 调用了但未注册」。
 
@@ -208,7 +228,10 @@ refreshMarket(reason)
     "market": "CN", "exchange": "SH", "sourceIds": {},
     "order": 0, "badgeEnabled": true,
     "alert": { "enabled": false, "upperPrice": null, "lowerPrice": null,
-               "upperChangePercent": null, "lowerChangePercent": null, "snoozedUntil": null }
+               "upperChangePercent": null, "lowerChangePercent": null,
+               "limitUp": false, "limitDown": false,
+               "volumeAnomaly": false, "volumeRatio": 2,
+               "rapidEnabled": false, "rapidPercent": 3, "rapidMinutes": 5 }
   }],
   "settings": {
     "main":    { "theme": "system", "refreshIntervalSeconds": 3, "colors": { "up": "#d92d20", "down": "#079455" } },
@@ -277,6 +300,7 @@ npm test
 # = node scripts/validate-build-config.js
 #   && node test/audit.js
 #   && node test/providers.test.js
+#   && node test/alerts.test.js
 #   && node test/dom.test.js
 ```
 
@@ -285,14 +309,16 @@ npm test
 | `scripts/validate-build-config.js` | 打包配置是否符合官方 schema |
 | `test/audit.js` | 引用与桥接一致性等静态检查 |
 | `test/providers.test.js` | 行情 / 搜索解析与降级联调 |
-| `test/dom.test.js` | 主窗口与浮窗的真实渲染交互 |
+| `test/alerts.test.js` | 提醒条件判定（涨跌停/量比/急涨急跌等） |
+| `test/dom.test.js` | 主窗口 / 浮窗 / K线 / 提醒窗口的真实渲染交互 |
 
 各文件具体覆盖：
 
 * **`scripts/validate-build-config.js`** — 用 electron-builder 官方 schema 校验 `build` 字段，拦截非法字段（如曾经的 `build.zip`）、重复或含非 ASCII 的产物命名、清单里不存在的资源与图标
 * **`test/audit.js`** — `$('id')` 引用的元素是否存在、桥接方法与 IPC 通道是否一一对应、内置指数 id 与前端中文名映射是否齐全、声明了 `display` 的元素是否有 `[hidden]` 同伴、是否误开 `nodeIntegration`、README 是否链接到文档
-* **`test/providers.test.js`** — smartbox `\uXXXX` 转义、GBK 自动识别、新浪/腾讯行解析、secid 与精度换算、品种归类（股票/基金/可转债）、版本比较，以及 mock fetch 下的三路合并、搜索兜底顺序、交易时段与调度决策
-* **`test/dom.test.js`** — jsdom 真跑：卡片渲染、提醒折叠态保持、铃铛三态、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗开合、设置页分组与开关、联想下拉、拖拽（含多指针与触摸场景）、状态栏休市文案、浮窗
+* **`test/providers.test.js`** — smartbox `\uXXXX` 转义、GBK 自动识别、新浪/腾讯行解析、secid 与精度换算、品种归类（股票/基金/可转债）、版本比较，以及 mock fetch 下的三路合并、搜索兜底顺序、K线/分时/明细解析、交易时段与调度决策
+* **`test/alerts.test.js`** — 提醒判定：上破/下跌价、涨幅/跌幅（含负值取绝对值）、各板块涨跌停（10/20/30）、量比异动、N 分钟急涨急跌（注入历史采样）、未启用/无行情不触发
+* **`test/dom.test.js`** — jsdom 真跑：卡片渲染、铃铛开/关、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗开合、设置页分组与开关、联想下拉、拖拽（含多指针与触摸场景）、状态栏休市文案、浮窗、K线窗口、提醒窗口回填与保存
 
 添加用例的原则：**优先用能复现真实 bug 的输入**。
 

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>价格提醒</title>
+<link rel="stylesheet" href="./alert.css" />
+</head>
+<body>
+<div class="head">
+  <div class="title" id="alertTitle">价格提醒</div>
+  <label class="switch"><input id="alEnabled" type="checkbox" /><span class="track"></span></label>
+  <span class="head-label" id="alEnabledLabel">启用提醒</span>
+</div>
+
+<div class="body">
+  <section class="card">
+    <h3>价格提醒</h3>
+    <div class="grid2">
+      <label class="field">上破价<span class="unit"><input id="alUpper" type="number" step="0.01" placeholder="元" /></span></label>
+      <label class="field">下跌价<span class="unit"><input id="alLower" type="number" step="0.01" placeholder="元" /></span></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>涨跌幅</h3>
+    <div class="grid2">
+      <label class="field">涨幅 ≥<span class="unit"><input id="alUpPct" type="number" step="0.1" placeholder="%" /></span></label>
+      <label class="field">跌幅 ≥<span class="unit"><input id="alDownPct" type="number" step="0.1" placeholder="%" /></span></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>涨跌停</h3>
+    <div class="grid2">
+      <div class="switchrow"><span>涨停附近提醒</span><label class="switch"><input id="alLimitUp" type="checkbox" /><span class="track"></span></label></div>
+      <div class="switchrow"><span>跌停附近提醒</span><label class="switch"><input id="alLimitDown" type="checkbox" /><span class="track"></span></label></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>成交量异动</h3>
+    <div class="switchrow">
+      <label class="switch"><input id="alVolAnomaly" type="checkbox" /><span class="track"></span></label>
+      <span>量比达到</span>
+      <span class="unit"><input id="alVolRatio" type="number" step="0.1" min="1" placeholder="2" /><i>倍</i></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>N 分钟急涨急跌</h3>
+    <div class="switchrow"><label class="switch"><input id="alRapid" type="checkbox" /><span class="track"></span></label><span>启用</span></div>
+    <div class="grid2">
+      <label class="field">时间窗口<span class="unit"><input id="alRapidMin" type="number" step="1" min="1" placeholder="5" /><i>分钟</i></span></label>
+      <label class="field">幅度 ≥<span class="unit"><input id="alRapidPct" type="number" step="0.1" min="0.1" placeholder="3" /><i>%</i></span></label>
+    </div>
+  </section>
+</div>
+
+<div class="foot">
+  <button id="alSave" class="primary">保存</button>
+  <button id="alDelete" class="danger">删除自选</button>
+  <span class="status" id="alStatus"></span>
+</div>
+<script src="./alert.js"></script>
+</body>
+</html>

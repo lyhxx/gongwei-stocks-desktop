@@ -11,19 +11,20 @@ const fhtml = fs.readFileSync(path.join(root, 'src', 'float', 'float.html'), 'ut
 const fjs = fs.readFileSync(path.join(root, 'src', 'float', 'float.js'), 'utf8');
 const chtml = fs.readFileSync(path.join(root, 'src', 'chart', 'chart.html'), 'utf8');
 const cjs = fs.readFileSync(path.join(root, 'src', 'chart', 'chart.js'), 'utf8');
+const ahtml = fs.readFileSync(path.join(root, 'src', 'alert', 'alert.html'), 'utf8');
+const ajs = fs.readFileSync(path.join(root, 'src', 'alert', 'alert.js'), 'utf8');
 
 const store = {
   schemaVersion: 1,
   stocks: [
     { id: 's1', code: '600000', name: '浦发银行', market: 'CN', exchange: 'SH', securityType: 'stock', order: 0, badgeEnabled: true,
-      alert: { enabled: true, upperPrice: 10, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: null } },
+      alert: { enabled: true, upperPrice: 10, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null } },
     { id: 's2', code: '000001', name: '平安银行', market: 'CN', exchange: 'SZ', securityType: 'stock', order: 1, badgeEnabled: false,
-      alert: { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: null } },
+      alert: { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null } },
     { id: 's3', code: '510300', name: '沪深300ETF华泰柏瑞', market: 'CN', exchange: 'SH', securityType: 'fund', order: 2, badgeEnabled: true,
-      alert: { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: null } },
+      alert: { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null } },
     { id: 's4', code: '113050', name: '南银转债', market: 'CN', exchange: 'SH', securityType: 'bond', order: 3, badgeEnabled: true,
-      // 暂停态：提醒开着但 snoozedUntil 在未来
-      alert: { enabled: true, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: new Date(Date.now() + 600000).toISOString() } },
+      alert: { enabled: true, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null } },
   ],
   settings: {
     main: { theme: 'dark', refreshIntervalSeconds: 3, colors: {} },
@@ -55,6 +56,7 @@ let updateMock = { checked: true, hasUpdate: false, current: '1.0.0', latest: '1
 let reorderCalls = [];
 let indexReorderCalls = [];
 let chartOpens = [];
+let alertOpens = [];
 const diagMock = {
   source: 'none',
   errors: [
@@ -82,11 +84,11 @@ window.gongwei = {
   updateAlert: async () => ({}),
   reorderStocks: async (ids) => { reorderCalls.push(ids); return ids; },
   reorderIndices: async (ids) => { indexReorderCalls.push(ids); return ids; },
-  snoozeStock: async () => ({}),
   updateSettings: async (patch) => {
     if (patch && patch.network) store.settings.network = { ...store.settings.network, ...patch.network };
     if (patch && patch.floating) store.settings.floating = { ...store.settings.floating, ...patch.floating };
     if (patch && patch.main) store.settings.main = { ...store.settings.main, ...patch.main };
+    if (patch && patch.indices) store.settings.indices = { ...store.settings.indices, ...patch.indices };
     return store.settings;
   },
   applyProxy: async () => proxyMock,
@@ -124,6 +126,7 @@ window.gongwei = {
   }),
   selftest: async () => ({ at: Date.now(), results: [] }),
   openChart: async (stock) => { chartOpens.push(stock); return true; },
+  openAlert: async (stock) => { alertOpens.push(stock); return true; },
   onMarket: (cb) => { listeners.market = cb; },
   onStore: (cb) => { listeners.store = cb; },
   onAlert: (cb) => { listeners.alert = cb; },
@@ -197,34 +200,33 @@ async function runQueued() {  for (const item of queued) {
     assert.strictEqual(byCode('113050').querySelector('.price').textContent, '118.365', '可转债 3 位小数');
     assert.strictEqual(byCode('600000').querySelector('.price').textContent, '9.10', '股票 2 位小数');
   });
-  t('展开态按提醒开关还原', () => {
-    const cfgs = d.querySelectorAll('div.aconfig');
-    assert.strictEqual(cfgs[0].hidden, false);
-    assert.strictEqual(cfgs[1].hidden, true);
-    assert.ok(d.querySelector('.bell.on'));
-    assert.ok(d.querySelector('.bell.off'));
+  t('一行式：无展开箭头与行内配置，铃铛/K线图标在行尾', () => {
+    assert.strictEqual(d.querySelector('[data-act="eye"]'), null);
+    assert.ok(d.querySelector('[data-act="bell"]'));
+    assert.strictEqual(d.querySelector('[data-act="chev"]'), null, '展开箭头应已移除');
+    assert.strictEqual(d.querySelector('.aconfig'), null, '行内配置应已移除');
+    const actions = d.querySelector('.srow .row-actions');
+    assert.ok(actions, '行尾应有图标分组');
+    assert.ok(actions.querySelector('[data-act="chart"]') && actions.querySelector('[data-act="bell"]'));
   });
   t('无「详情」字样（details 已换 div）', () => {
     assert.ok(!d.getElementById('stocks').textContent.includes('详情'));
     assert.strictEqual(d.querySelectorAll('details').length, 0);
   });
-  t('一行式：无眼睛、有铃铛与展开箭头', () => {
-    assert.strictEqual(d.querySelector('[data-act="eye"]'), null);
-    assert.ok(d.querySelector('[data-act="bell"]'));
-    assert.ok(d.querySelector('[data-act="chev"]'));
-  });
-  t('行情 tick 不冲展开态与输入值，数值原地更新', () => {
+  t('行情 tick 原地更新数值、不重建行', () => {
     const before = d.querySelectorAll('.stock');
-    before[1].querySelector('[data-act="chev"]').click();
-    before[1].querySelector('input[data-k="upperPrice"]').value = '12.5';
     listeners.market(JSON.parse(JSON.stringify(marketData)));
     const after = d.querySelectorAll('.stock');
     assert.strictEqual(after.length, 4);
-    assert.strictEqual(after[1].querySelector('.aconfig').hidden, false, '展开态保持');
-    assert.strictEqual(after[1].querySelector('input[data-k="upperPrice"]').value, '12.5', '输入值保持');
+    assert.strictEqual(after[0], before[0], '同一行元素应保留（原地更新）');
     assert.ok(after[0].querySelector('.price').textContent.includes('9.10'));
-    // 原有的展开/收起初始态断言在下面这条里继续生效
-    assert.strictEqual(after[2].querySelector('.aconfig').hidden, true, '未开的仍收起');
+  });
+  t('点击铃铛打开提醒窗口', async () => {
+    alertOpens = [];
+    d.querySelector('#stocks .stock [data-act="bell"]').click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(alertOpens.length, 1, '应调用 openAlert');
+    assert.strictEqual(alertOpens[0].code, '600000');
   });
 
   console.log('[指数]');
@@ -370,13 +372,18 @@ async function runQueued() {  for (const item of queued) {
     assert.ok(txt.includes('HTTP 代理 127.0.0.1:7897'), txt.slice(0, 120));
     d.getElementById('modalClose').click();
   });
-  t('设置弹窗开合 + 回填 + 保存', async () => {
+  t('设置弹窗开合 + 回填 + 保存（含浮窗指数开关）', async () => {
     d.getElementById('btnOpenSettings').click();
     assert.strictEqual(d.getElementById('modalOverlay').hidden, false);
     assert.strictEqual(d.getElementById('setTheme').value, 'dark');
+    assert.strictEqual(d.getElementById('setFloatIndices').checked, true, '默认浮窗显示指数');
+    // 关掉「浮窗显示指数」并保存
+    d.getElementById('setFloatIndices').checked = false;
     d.getElementById('btnSaveSettings').click();
     await new Promise((r) => setTimeout(r, 30));
     assert.strictEqual(d.getElementById('modalOverlay').hidden, true);
+    assert.strictEqual(store.settings.indices.floatingVisible, false, '应写入 floatingVisible=false');
+    store.settings.indices.floatingVisible = true; // 还原，避免影响后续浮窗用例
   });
   t('自检弹窗打开/关闭', () => {
     d.getElementById('btnGoSelftest').click();
@@ -429,8 +436,9 @@ async function runQueued() {  for (const item of queued) {
     const rows = () => [...d.querySelectorAll('#stocks .stock')];
     assert.strictEqual(rows().length, 4);
     assert.ok(rows()[0].querySelector('.drag-handle'), '每行保留拖拽把手作为提示');
-    const opsText = [...d.querySelectorAll('.stock .ops button')].map((b) => b.textContent);
-    assert.ok(!opsText.some((x) => x.includes('上移') || x.includes('下移')), '旧的上下移按钮应移除：' + opsText.join(','));
+    assert.strictEqual(d.querySelectorAll('.stock .ops').length, 0, '行内操作区应已移除');
+    const rowText = d.getElementById('stocks').textContent;
+    assert.ok(!rowText.includes('上移') && !rowText.includes('下移'), '旧的上下移按钮应移除');
 
     // jsdom 不做布局，getBoundingClientRect 恒为 0；这里按顺序打上矩形桩，
     // 才能真正走到落点计算（真实 Chromium 里的表现由拖拽测试台单独验证过）
@@ -503,22 +511,18 @@ async function runQueued() {  for (const item of queued) {
     assert.strictEqual(indexReorderCalls[0][indexReorderCalls[0].length - 1], before[0], '第一张应被拖到末尾');
   });
 
-  t('铃铛开启/关闭/暂停 图标与颜色可区分', () => {
+  t('铃铛开启/关闭 图标与颜色可区分', () => {
     const bells = [...d.querySelectorAll('.icon-btn.bell')];
     assert.strictEqual(bells.length, 4);
-    // 用 SVG 而不是 emoji：彩色 emoji 不受 CSS color 影响，三种状态会长得一样
+    // 用 SVG 而不是 emoji：彩色 emoji 不受 CSS color 影响，状态会长得一样
     bells.forEach((b) => assert.ok(b.querySelector('svg'), '铃铛必须是内联 SVG'));
-    const stateOf = (b) => ['on', 'off', 'snooze'].find((c) => b.classList.contains(c));
-    const on = bells[0];     // s1 浦发银行：开启
-    const off = bells[1];    // s2 平安银行：关闭
-    const snooze = bells[3]; // s4 南银转债：暂停
+    const stateOf = (b) => ['on', 'off'].find((c) => b.classList.contains(c));
+    const on = bells[0];  // s1 浦发银行：开启
+    const off = bells[1]; // s2 平安银行：关闭
     assert.strictEqual(stateOf(on), 'on');
     assert.strictEqual(stateOf(off), 'off');
-    assert.strictEqual(stateOf(snooze), 'snooze');
     const colorOf = (b) => window.getComputedStyle(b).color;
     assert.notStrictEqual(colorOf(on), colorOf(off), '开启与关闭颜色应不同');
-    assert.notStrictEqual(colorOf(on), colorOf(snooze), '开启与暂停颜色应不同');
-    // 关闭态用带斜杠的样式，图形本身也不同
     assert.ok(off.querySelector('svg line'), '关闭态铃铛应带斜杠');
     assert.ok(!on.querySelector('svg line'), '开启态铃铛不应有斜杠');
   });
@@ -531,7 +535,7 @@ async function runQueued() {  for (const item of queued) {
     assert.deepStrictEqual(titles, ['外观', '行情', '浮窗', '提醒通道', '网络代理'], '应分成五组：' + titles.join(','));
     // 开关代替原生 checkbox
     const switches = [...body.querySelectorAll('.switch input[type=checkbox]')];
-    assert.strictEqual(switches.length, 4, '应有 4 个开关（浮窗/通知/声音/仅交易时段）');
+    assert.strictEqual(switches.length, 5, '应有 5 个开关（浮窗/浮窗指数/通知/声音/仅交易时段）');
     switches.forEach((s) => assert.ok(s.parentElement.querySelector('.track'), '开关要有可视轨道'));
 
     // 代理测试：点一下出结果 chip
@@ -687,8 +691,7 @@ async function runQueued() {  for (const item of queued) {
     assert.ok(!/scrollbar-width\s*:/.test(css), '不能写 scrollbar-width，否则自定义滚动条失效');
     assert.ok(!/scrollbar-color\s*:/.test(css), '不能写 scrollbar-color，否则自定义滚动条失效');
     assert.ok(/::-webkit-scrollbar\s*\{/.test(css), '应有自定义滚动条样式');
-    assert.ok(/\.alert-grid\s*\{[^}]*minmax\(0,\s*1fr\)/.test(css), 'alert-grid 必须用 minmax(0,1fr) 才能被输入框压缩');
-    assert.ok(/\.alert-grid input\s*\{[^}]*min-width:\s*0/.test(css), 'alert-grid 输入框需 min-width:0');
+    assert.ok(/\.row-actions\s*\{/.test(css), '行尾图标分组样式应存在');
   });
 
   console.log('[K线窗口]');
@@ -775,6 +778,51 @@ async function runQueued() {  for (const item of queued) {
   });
   // 关闭窗口以清掉图表窗口里的自动刷新定时器，避免测试进程不退出
   if (typeof cwin.close === 'function') cwin.close();
+
+  console.log('[提醒窗口]');
+  const adom = new JSDOM(ahtml, { url: 'http://localhost/', runScripts: 'outside-only' });
+  const awin = adom.window;
+  awin.matchMedia = () => ({ matches: false });
+  const alertStock = { id: 's1', code: '600000', name: '浦发银行', market: 'CN', exchange: 'SH' };
+  const alertStore = { stocks: [{ ...alertStock, alert: { enabled: true, upperPrice: 12, lowerPrice: null, upperChangePercent: 5, lowerChangePercent: null, limitUp: false, limitDown: true, volumeAnomaly: true, volumeRatio: 2.5, rapidEnabled: false, rapidPercent: 3, rapidMinutes: 5 } }], settings: { main: { theme: 'light' } } };
+  const alertPatches = [];
+  awin.gongwei = {
+    getStore: async () => JSON.parse(JSON.stringify(alertStore)),
+    getAlertStock: async () => alertStock,
+    updateAlert: async (id, patch) => { alertPatches.push({ id, patch }); return {}; },
+    removeStock: async () => true,
+    onStore: (cb) => { awin.__onStore = cb; },
+    onAlertUpdate: (cb) => { awin.__onAlert = cb; },
+  };
+  awin.eval(ajs);
+  await new Promise((r) => setTimeout(r, 40));
+  const ad = awin.document;
+  ft('提醒窗口：回填条件与开关', () => {
+    assert.ok(ad.getElementById('alertTitle').textContent.includes('600000'));
+    assert.strictEqual(ad.getElementById('alEnabled').checked, true);
+    assert.strictEqual(ad.getElementById('alUpper').value, '12');
+    assert.strictEqual(ad.getElementById('alUpPct').value, '5');
+    assert.strictEqual(ad.getElementById('alLimitDown').checked, true);
+    assert.strictEqual(ad.getElementById('alLimitUp').checked, false);
+    assert.strictEqual(ad.getElementById('alVolAnomaly').checked, true);
+    assert.strictEqual(ad.getElementById('alVolRatio').value, '2.5');
+    assert.strictEqual(ad.getElementById('alRapid').checked, false);
+  });
+  ad.getElementById('alUpper').value = '13.5';
+  ad.getElementById('alRapidPct').value = '4';
+  ad.getElementById('alSave').click();
+  await new Promise((r) => setTimeout(r, 40));
+  ft('提醒窗口：保存按钮回写全部字段', () => {
+    assert.ok(alertPatches.length >= 1, '应调用 updateAlert');
+    const p = alertPatches[alertPatches.length - 1].patch;
+    assert.strictEqual(p.upperPrice, 13.5);
+    assert.strictEqual(p.limitDown, true);
+    assert.strictEqual(p.volumeAnomaly, true);
+    assert.strictEqual(p.volumeRatio, 2.5);
+    assert.strictEqual(p.rapidPercent, 4);
+    assert.strictEqual(p.rapidMinutes, 5);
+  });
+  if (typeof awin.close === 'function') awin.close();
 
   console.log(`\nDOM: 共 ${passed} 项，${process.exitCode ? '有失败' : '全部通过'}`);
 })();

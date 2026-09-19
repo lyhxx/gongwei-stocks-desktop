@@ -9,9 +9,9 @@
 
 const EASTMONEY_UT = 'fa5fd1943c7b386f172d6893dbfba10b';
 const EASTMONEY_HOSTS = ['push2.eastmoney.com', 'push2delay.eastmoney.com'];
-// 只请求真正会用到的字段（现价/开高低/昨收/名称/精度/涨跌），字段越少响应体越小
+// 只请求真正会用到的字段（现价/开高低/昨收/名称/精度/涨跌/量/量比），字段越少响应体越小
 const EASTMONEY_FIELDS = [
-  'f43', 'f44', 'f45', 'f46', 'f58', 'f59', 'f60', 'f152', 'f169', 'f170',
+  'f43', 'f44', 'f45', 'f46', 'f47', 'f50', 'f58', 'f59', 'f60', 'f152', 'f169', 'f170',
 ].join(',');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -121,10 +121,12 @@ async function fetchOneEastmoney(stock) {
       const f59 = decimalsOf(r.f59);
       const f152 = decimalsOf(r.f152);
       const decimals = f59 !== undefined ? f59 : (f152 !== undefined ? f152 : classifyCode(stock.code).decimals);
+      const vr = toNum(r.f50); // 量比（×100）
       return {
         stockId: stock.id, code: stock.code, name,
         latestPrice: price, changePercent, changeAmount: change,
         preClose, open: numScale(r.f46, scale), high: numScale(r.f44, scale), low: numScale(r.f45, scale),
+        volume: toNum(r.f47), volumeRatio: Number.isFinite(vr) ? vr / 100 : NaN,
         decimals,
         ok: Number.isFinite(price), updatedAt: Date.now(),
       };
@@ -421,23 +423,6 @@ function classifyCode(code) {
   if (c.startsWith('0') || c.startsWith('3')) return { exchange: 'SZ', securityType: 'stock', decimals: 2 };
   if (c.startsWith('4') || c.startsWith('8') || c.startsWith('9')) return { exchange: 'BJ', securityType: 'stock', decimals: 2 };
   return { exchange: 'SZ', securityType: 'stock', decimals: 2 };
-}
-
-// ETF 还是 LOF：场外基金被过滤，剩下的场内基金里 16xxxx / 501~506xxx 多为 LOF
-function fundKind(code) {
-  const c = String(code || '');
-  return /^(16\d{4}|(?:501|502|506)\d{3})$/.test(c) ? 'LOF' : 'ETF';
-}
-
-function securityTypeLabel(stock) {
-  const t = (stock && stock.securityType) || 'stock';
-  if (t === 'fund') return fundKind(stock.code);
-  if (t === 'bond') return '债';
-  if (t === 'index') return '指';
-  const mk = stock && stock.market;
-  if (mk === 'HK') return '港';
-  if (mk === 'US') return '美';
-  return '';
 }
 
 // 主通道：腾讯 smartbox（免 token，实测支持代码/名称/拼音缩写，网络兼容最好）
@@ -816,7 +801,7 @@ module.exports = {
   EASTMONEY_UT,
   eastmoneySecid, tencentSymbol, sinaSymbol,
   numScale, pct100, marketFromSuggest, unescapeUnicode, decodeAuto,
-  classifyCode, fundKind, securityTypeLabel, typeFromSuggest,
+  classifyCode, typeFromSuggest,
   parseSinaLine, parseTencentLine, parseSmartbox, parseSinaSuggest, parseXueqiuSuggest, directCodeCandidate,
   fetchEastmoney, fetchSina, fetchTencent, mergeQuoteRows,
   KLINE_PERIODS, fetchKline, fetchTrends, fetchStockDetail,

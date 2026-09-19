@@ -2,13 +2,14 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, globalShortcut, screen, nativeImage, net, session, shell, nativeTheme } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
-const { INDICES, defaultState } = require('./common/defaults');
+const { INDICES, defaultState, blankAlert } = require('./common/defaults');
 const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest, classifyCode, connectivityTest, mergeQuoteRows, fetchKline, fetchTrends, fetchStockDetail } = require('./common/providers');
 const { setFetchImpl, fetchWithTimeout } = require('./common/http');
 const { normalizeProxyMode, normalizeProxyRules, describeResolvedProxy } = require('./common/proxy');
 const { isNewer, pickDownloadAsset } = require('./common/version');
 const { describePhase, planTick } = require('./common/market-hours');
 const { applyOrder, applyIndexOrder } = require('./common/order');
+const { checkAlerts, fmtPct } = require('./common/alerts');
 
 const store = new Store({ name: 'gongwei-stocks', defaults: defaultState() });
 ensureDefaults();
@@ -44,8 +45,8 @@ function themeBackground(theme) {
 // Windows 会给它画一圈直角阴影，圆角外面就会露出直角（曾踩过）
 function syncWindowBackground() {
   const bg = themeBackground(effectiveTheme());
-  // 只给有系统边框的窗口刷底色（主窗口、K 线窗口）；透明浮窗不能设，否则圆角外露直角
-  for (const w of [mainWin, chartWin]) {
+  // 只给有系统边框的窗口刷底色（主窗口、K 线/提醒窗口）；透明浮窗不能设，否则圆角外露直角
+  for (const w of [mainWin, chartWin, alertWin]) {
     if (w && !w.isDestroyed()) w.setBackgroundColor(bg);
   }
 }
@@ -122,7 +123,7 @@ function ensureDefaults() {
 function normalizeStocks(st) {
   if (!st || !Array.isArray(st.stocks)) return;
   let changed = false;
-  const blank = { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: null };
+  const blank = blankAlert();
   st.stocks = st.stocks.filter((s) => {
     if (!s || typeof s !== 'object' || !s.code) { changed = true; return false; }
     return true;
@@ -264,34 +265,26 @@ function backfillNames(stocks, quotes) {
 }
 
 // ---------- 告警判定 ----------
-function isSnoozed(alert) {
-  if (!alert || !alert.snoozedUntil) return false;
-  return Date.parse(alert.snoozedUntil) > Date.now();
-}
-
-function checkAlerts(stocks, quotes) {
-  const byId = new Map(quotes.map((q) => [q.stockId, q]));
-  const hits = [];
-  for (const s of stocks) {
-    const a = s.alert;
-    if (!a || !a.enabled || isSnoozed(a)) continue;
-    const q = byId.get(s.id);
-    if (!q || !q.ok) continue;
-    const reasons = [];
-    if (typeof a.upperPrice === 'number' && q.latestPrice >= a.upperPrice) reasons.push(`价格达到 ${a.upperPrice}`);
-    if (typeof a.lowerPrice === 'number' && q.latestPrice <= a.lowerPrice) reasons.push(`价格跌至 ${a.lowerPrice}`);
-    if (typeof a.upperChangePercent === 'number' && q.changePercent >= a.upperChangePercent) reasons.push(`涨幅达到 ${a.upperChangePercent}%`);
-    if (typeof a.lowerChangePercent === 'number' && q.changePercent <= -a.lowerChangePercent) reasons.push(`跌幅达到 ${a.lowerChangePercent}%`);
-    if (reasons.length) {
-      hits.push({ stockId: s.id, stockName: s.name, stockCode: s.code, latestPrice: q.latestPrice, changePercent: q.changePercent, reasons });
-    }
+// 判定本身在 common/alerts.js（纯函数，有单测）；这里维护「N 分钟急涨急跌」用的价格采样
+const priceHistory = new Map();
+const HISTORY_MAX_MS = 120 * 60 * 1000;
+function pruneHistory(now) {
+  for (const [id, arr] of priceHistory) {
+    while (arr.length && now - arr[0].t > HISTORY_MAX_MS) arr.shift();
+    if (!arr.length) priceHistory.delete(id);
   }
-  return hits;
+}
+function recordPriceHistory(quotes) {
+  const now = Date.now();
+  for (const q of quotes) {
+    if (!q || !q.ok || !Number.isFinite(q.latestPrice)) continue;
+    let arr = priceHistory.get(q.stockId);
+    if (!arr) { arr = []; priceHistory.set(q.stockId, arr); }
+    arr.push({ t: now, p: q.latestPrice });
+  }
+  pruneHistory(now);
 }
 
-function fmtPct(v) {
-  return Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` : '--';
-}
 function fmtPrice(v) {
   return Number.isFinite(v) ? v.toFixed(2) : '--';
 }
@@ -386,8 +379,9 @@ async function doRefreshMarket(reason = 'auto') {
   ));
   if (gen !== refreshGen) return lastQuotes; // 本轮已过期，收尾也别做
   backfillNames(stocks, lastQuotes.stockQuotes);
+  recordPriceHistory(lastQuotes.stockQuotes); // 先留样，供「N 分钟急涨急跌」比对
   // 告警只对自选股做（同只 5 分钟内只提醒一次，避免每轮询一次轰炸一次）
-  const hits = checkAlerts(stocks, lastQuotes.stockQuotes).filter((h) => {
+  const hits = checkAlerts(stocks, lastQuotes.stockQuotes, { history: priceHistory }).filter((h) => {
     const last = alertCooldown.get(h.stockId) || 0;
     if (Date.now() - last < 5 * 60 * 1000) return false;
     alertCooldown.set(h.stockId, Date.now());
@@ -699,6 +693,39 @@ function openChartWindow(stock) {
   if (!chartWin.webContents.isLoading()) chartWin.webContents.send('chart:update', chartStock);
 }
 
+// ---------- 提醒独立窗口 ----------
+let alertWin = null;
+let alertStock = null;
+
+function createAlertWindow() {
+  const win = new BrowserWindow({
+    width: 560,
+    height: 740,
+    minWidth: 460,
+    minHeight: 480,
+    title: '价格提醒',
+    icon: APP_ICON,
+    autoHideMenuBar: true,
+    backgroundColor: themeBackground(effectiveTheme()),
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  });
+  win.loadFile(path.join(__dirname, 'alert', 'alert.html'));
+  win.on('closed', () => { if (alertWin === win) alertWin = null; });
+  return win;
+}
+
+function openAlertWindow(stock) {
+  alertStock = stock || null;
+  if (!alertWin || alertWin.isDestroyed()) {
+    alertWin = createAlertWindow(); // 页面加载后由 alert.js 主动来取当前股票
+    return;
+  }
+  if (alertWin.isMinimized()) alertWin.restore();
+  alertWin.show();
+  alertWin.focus();
+  if (!alertWin.webContents.isLoading()) alertWin.webContents.send('alert:update', alertStock);
+}
+
 function createTray() {
   let trayIcon = nativeImage.createEmpty();
   try {
@@ -774,6 +801,8 @@ function registerIpc() {
   ipcMain.handle('detail:get', (_e, stock) => fetchStockDetail(stock || {}));
   ipcMain.handle('chart:open', (_e, stock) => { openChartWindow(stock); return true; });
   ipcMain.handle('chart:stock', () => chartStock);
+  ipcMain.handle('alert:open', (_e, stock) => { openAlertWindow(stock); return true; });
+  ipcMain.handle('alert:stock', () => alertStock);
 
   ipcMain.handle('stocks:add', (_e, item) => {
     const st = getState();
@@ -792,7 +821,7 @@ function registerIpc() {
       sourceIds: item.sourceIds || {},
       order: st.stocks.length,
       badgeEnabled: true,
-      alert: { enabled: false, upperPrice: null, lowerPrice: null, upperChangePercent: null, lowerChangePercent: null, snoozedUntil: null },
+      alert: blankAlert(),
     };
     st.stocks.push(stock);
     st.updatedAt = new Date().toISOString();
@@ -810,6 +839,7 @@ function registerIpc() {
     // 彻底清残留：行情缓存 + 提醒冷却里的旧 id，否则界面/托盘还留着影子
     lastQuotes.stockQuotes = (lastQuotes.stockQuotes || []).filter((q) => q.stockId !== id);
     alertCooldown.delete(id);
+    priceHistory.delete(id);
     broadcastStore();
     broadcastMarket();
     refreshMarket('manual');
@@ -835,18 +865,6 @@ function registerIpc() {
     store.set(st);
     broadcastStore();
     return st.stocks.map((s) => s.id);
-  });
-
-  ipcMain.handle('stocks:snooze', (_e, { id, minutes = 30 }) => {
-    const st = getState();
-    const s = st.stocks.find((x) => x.id === id);
-    if (!s) throw new Error('找不到股票');
-    if (!s.alert || typeof s.alert !== 'object') s.alert = { enabled: false };
-    s.alert.snoozedUntil = new Date(Date.now() + minutes * 60 * 1000).toISOString();
-    st.updatedAt = new Date().toISOString();
-    store.set(st);
-    broadcastStore();
-    return s;
   });
 
   ipcMain.handle('float:toggle', () => { toggleFloat(); return true; });
@@ -966,6 +984,7 @@ function broadcastStore() {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('store:changed', st);
   if (floatWin && !floatWin.isDestroyed()) floatWin.webContents.send('store:changed', st);
   if (chartWin && !chartWin.isDestroyed()) chartWin.webContents.send('store:changed', st);
+  if (alertWin && !alertWin.isDestroyed()) alertWin.webContents.send('store:changed', st);
 }
 
 // 启动时先把指数名单广播出去（不等慢速行情回来，界面秒出中文名）

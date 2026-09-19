@@ -357,6 +357,10 @@ function openSettings() {
         <span class="set-label">显示浮窗</span>
         <label class="switch"><input id="setFloatEnabled" type="checkbox" /><span class="track"></span></label>
       </div>
+      <div class="set-row">
+        <span class="set-label">浮窗显示指数</span>
+        <label class="switch"><input id="setFloatIndices" type="checkbox" /><span class="track"></span></label>
+      </div>
     </div>
 
     <div class="set-group">
@@ -528,7 +532,7 @@ const flipAnims = new WeakMap();
 
 // 拖拽时不要抢这些元素自己的交互。
 // 注意：不要把 .drag-handle 排除掉，把手反而是最该能拖的地方
-const NO_DRAG_SELECTOR = 'button, input, select, textarea, a, .aconfig';
+const NO_DRAG_SELECTOR = 'button, input, select, textarea, a';
 
 function dragItemsOf(container) {
   return [...container.querySelectorAll('[data-drag-id]')];
@@ -700,9 +704,8 @@ const BELL_OFF = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="t
 // K 线图标（两根蜡烛），同样用 currentColor 以便跟随主题/状态变色
 const CHART_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="7" width="4" height="9" rx=".5" fill="currentColor"/><rect x="6.6" y="3" width=".8" height="18" fill="currentColor"/><rect x="15" y="5" width="4" height="6" rx=".5" fill="currentColor"/><rect x="16.6" y="3" width=".8" height="18" fill="currentColor"/></svg>';
 
-function bellLabel(a, snoozed) {
-  if (!a.enabled) return '开启价格提醒';
-  return snoozed ? '提醒已暂停，点击恢复' : '关闭价格提醒';
+function bellLabel(a) {
+  return a.enabled ? '价格提醒已开启，点击设置' : '价格提醒未开启，点击设置';
 }
 
 // toast：替代原生 alert，不阻塞、不打断盯盘
@@ -729,28 +732,13 @@ function renderStocks() {
   // 拖拽进行中绝不动 DOM：否则被拖元素会被替换，指针事件与位置全乱
   // （数值仍会通过 updateMarketUI 原地刷新，不影响盯盘）
   if (isDragging()) return;
-  // 首屏即时渲染真卡片（名字来自本地，数值填 -- 等行情），不等行情回来
-  // 重建前先捞出用户态（展开/未保存输入），重建后还原：任何重建都不丢用户操作
-  const prevOpen = new Set();
-  const prevInputs = {};
-  box.querySelectorAll('.stock').forEach((el) => {
-    const id = el.getAttribute('data-stock');
-    const cfg = el.querySelector('.aconfig');
-    if (id && cfg && !cfg.hidden) prevOpen.add(id);
-    el.querySelectorAll('input[data-k]').forEach((inp) => {
-      if (!id) return;
-      (prevInputs[id] = prevInputs[id] || {})[inp.dataset.k] = inp.value;
-    });
-  });
   box.innerHTML = '';
-  const total = state.stocks.length;
-  state.stocks.forEach((s, idx) => {
+  state.stocks.forEach((s) => {
     const q = quoteOf(s.id);
     const hasQ = q && q.ok;
     const pct = hasQ ? q.changePercent : 0;
     const up = pct >= 0;
     const a = s.alert || {};
-    const snoozed = a.snoozedUntil && Date.parse(a.snoozedUntil) > Date.now();
     const div = document.createElement('div');
     div.className = 'stock compact';
     div.setAttribute('data-stock', s.id);
@@ -762,84 +750,15 @@ function renderStocks() {
         <span class="name" title="${escapeHtml(s.code)}">${escapeHtml(s.name)}<small>${escapeHtml(s.code)}</small>${tl ? `<i class="type-badge">${tl}</i>` : ''}</span>
         <span class="price">${fmtQuotePrice(q)}</span>
         <span class="pill ${up ? 'pct-up' : 'pct-down'}">${hasQ ? `${pct >= 0 ? '+' : ''}${fmt(pct)}%` : '--'}</span>
-        <button class="icon-btn chart" data-act="chart" title="查看K线 / 分时">${CHART_ICON}</button>
-        <button class="icon-btn bell ${!a.enabled ? 'off' : (snoozed ? 'snooze' : 'on')}" data-act="bell" title="${bellLabel(a, snoozed)}">${!a.enabled ? BELL_OFF : BELL_ON}</button>
-        <button class="icon-btn chev" data-act="chev" title="展开条件设置">›</button>
-      </div>
-      <div class="aconfig" ${a.enabled ? '' : 'hidden'}>
-        <div class="alert-grid">
-          <label>上破价<input data-k="upperPrice" type="number" step="0.01" value="${a.upperPrice ?? ''}" /></label>
-          <label>下跌价<input data-k="lowerPrice" type="number" step="0.01" value="${a.lowerPrice ?? ''}" /></label>
-          <label>涨幅%<input data-k="upperChangePercent" type="number" step="0.1" value="${a.upperChangePercent ?? ''}" /></label>
-          <label>跌幅%<input data-k="lowerChangePercent" type="number" step="0.1" value="${a.lowerChangePercent ?? ''}" /></label>
-        </div>
-        <div class="ops"></div>
+        <span class="row-actions">
+          <button class="icon-btn chart" data-act="chart" title="查看K线 / 分时">${CHART_ICON}</button>
+          <button class="icon-btn bell ${!a.enabled ? 'off' : 'on'}" data-act="bell" title="${bellLabel(a)}">${!a.enabled ? BELL_OFF : BELL_ON}</button>
+        </span>
       </div>`;
-    const cfg = div.querySelector('.aconfig');
-    const chev = div.querySelector('[data-act="chev"]');
-    // 还原用户态：之前展开的保持展开，正在填的值原样写回
-    if (prevOpen.has(s.id)) cfg.hidden = false;
-    if (prevInputs[s.id]) {
-      div.querySelectorAll('input[data-k]').forEach((inp) => {
-        if (prevInputs[s.id][inp.dataset.k] !== undefined) inp.value = prevInputs[s.id][inp.dataset.k];
-      });
-    }
-    const syncChev = () => chev.classList.toggle('open', !cfg.hidden);
-    syncChev();
-    chev.onclick = () => { cfg.hidden = !cfg.hidden; syncChev(); };
+    // 图标统一靠右；铃铛打开「价格提醒」独立窗口，行内不再展开配置
     div.querySelector('[data-act="chart"]').onclick = () => window.gongwei.openChart(s);
-    div.querySelector('[data-act="bell"]').onclick = async () => {
-      const patch = { enabled: !a.enabled };
-      if (!a.enabled) patch.snoozedUntil = null;
-      await window.gongwei.updateAlert(s.id, patch);
-      state = await window.gongwei.getStore();
-      renderAll();
-    };
-    const ops = div.querySelector('.ops');
-    const mkBtn = (text, fn, cls) => {
-      const b = document.createElement('button');
-      b.textContent = text;
-      if (cls) b.className = cls;
-      b.onclick = fn;
-      ops.appendChild(b);
-      return b;
-    };
+    div.querySelector('[data-act="bell"]').onclick = () => window.gongwei.openAlert(s);
     attachDrag(div);
-    mkBtn('保存条件', async () => {
-      const patch = {};
-      div.querySelectorAll('input[data-k]').forEach((inp) => {
-        const v = inp.value === '' ? null : Number(inp.value);
-        patch[inp.dataset.k] = Number.isFinite(v) ? v : null;
-      });
-      await window.gongwei.updateAlert(s.id, patch);
-      state = await window.gongwei.getStore();
-      toast('提醒条件已保存');
-      renderAll();
-    });
-    mkBtn('暂停30分钟', async () => {
-      await window.gongwei.snoozeStock(s.id, 30);
-      state = await window.gongwei.getStore();
-      renderAll();
-    });
-    // 两击删除：第一击变确认态，第二击执行（替代原生 confirm 弹窗）
-    const delBtn = mkBtn('删除', async () => {
-      if (!delBtn.dataset.armed) {
-        delBtn.dataset.armed = '1';
-        delBtn.textContent = '确认删除？';
-        delBtn.classList.add('danger');
-        setTimeout(() => {
-          if (delBtn.isConnected) {
-            delete delBtn.dataset.armed;
-            delBtn.textContent = '删除';
-            delBtn.classList.remove('danger');
-          }
-        }, 3000);
-        return;
-      }
-      await window.gongwei.removeStock(s.id);
-      state = await window.gongwei.getStore();
-      renderAll();
-    });
     box.appendChild(div);
   });
 }
@@ -977,6 +896,7 @@ function fillSettings(force) {
   $('setInterval').value = state.settings.main.refreshIntervalSeconds;
   $('setOpacity').value = state.settings.floating.opacity;
   $('setFloatEnabled').checked = !!state.settings.floating.enabled;
+  if ($('setFloatIndices')) $('setFloatIndices').checked = state.settings.indices.floatingVisible !== false;
   if ($('setMarketHours')) $('setMarketHours').checked = state.settings.main.marketHoursOnly !== false;
   $('setNotify').checked = (state.settings.alerts.channels || []).includes('notify');
   $('setSound').checked = (state.settings.alerts.channels || []).includes('sound');
@@ -999,6 +919,7 @@ async function saveSettings() {
       opacity: Number($('setOpacity').value) || 88,
       enabled: $('setFloatEnabled').checked,
     },
+    indices: { floatingVisible: $('setFloatIndices') ? $('setFloatIndices').checked : true },
     alerts: { channels },
     network: {
       proxyMode: $('setProxyMode') ? $('setProxyMode').value : 'system',
