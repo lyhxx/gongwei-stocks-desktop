@@ -3,12 +3,6 @@
 隐蔽、轻量的 Windows 桌面股票行情助手。常驻系统托盘，提供自选行情、指数看板、桌面浮窗与价格提醒。
 
 <p align="center">
-  <img src="docs/images/main-light.png" width="360" alt="主界面">
-  &nbsp;&nbsp;
-  <img src="docs/images/float-light.png" width="236" alt="桌面浮窗">
-</p>
-
-<p align="center">
   <a href="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml"><img src="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml/badge.svg" alt="build"></a>
   <img src="https://img.shields.io/badge/platform-Windows-0078d4" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
@@ -29,7 +23,9 @@
 
 ## 界面
 
-主界面与浮窗见上图；下面是深色主题、设置、K 线窗口与价格提醒窗口：
+| 主界面 | 桌面浮窗 |
+| --- | --- |
+| ![主界面](docs/images/main-light.png) | ![桌面浮窗](docs/images/float-light.png) |
 
 | 深色主题 | 设置 |
 | --- | --- |
