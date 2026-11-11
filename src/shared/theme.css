@@ -1,0 +1,184 @@
+/* 工位看盘 - 共享主题层
+ *
+ * 四个窗口（主界面 / 浮窗 / K线 / 提醒）共用的设计变量与基础控件。
+ * 风格：深色监控面板 —— 深底、等宽数字、信息密度高、克制的描边。
+ *
+ * 注意：
+ * - 浅色主题保留原来的红涨绿跌（A股习惯），深色主题把红绿提亮一档以适配深底；
+ * - 数字统一用等宽字体（--font-num），数字跳动时不会左右抖；
+ * - [hidden] 全局兜底必须留在这里：.foo{display:grid} 会盖掉浏览器默认的
+ *   [hidden]{display:none}，导致「关不上」，用 !important 兜住。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* 底色与面板 */
+  --bg: #eef1f5;
+  --panel: #ffffff;
+  --panel-2: #f6f8fb;
+  --panel-3: #eef2f7;
+  --line: #dce3ec;
+  --line-soft: #e9eef4;
+
+  /* 文字 */
+  --text: #16202b;
+  --muted: #66768a;
+  --dim: #8b99ab;
+
+  /* 涨跌（红涨绿跌） */
+  --up: #d92d20;
+  --down: #079455;
+  --up-soft: #fdeceb;
+  --down-soft: #e7f6ef;
+
+  /* 主色与状态 */
+  --accent: #2f6fed;
+  --accent-soft: #e8effe;
+  --warn: #b5761b;
+  --warn-soft: #fdf3e2;
+
+  /* 窗口框架 */
+  --win-radius: 12px;
+  --win-title-h: 34px;
+  --shadow: 0 2px 18px rgba(15, 23, 42, .22);
+  --shadow-pop: 0 14px 40px rgba(15, 23, 42, .26);
+
+  --font-ui: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, sans-serif;
+  --font-num: "Cascadia Mono", "Consolas", ui-monospace, "SF Mono", monospace;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0b0f14;
+  --panel: #131a23;
+  --panel-2: #18212c;
+  --panel-3: #1e2833;
+  --line: #222d3b;
+  --line-soft: #1a2430;
+
+  --text: #d8e2ec;
+  --muted: #7b8a9b;
+  --dim: #576678;
+
+  --up: #ff5c5c;
+  --down: #1fc97d;
+  --up-soft: #2a1618;
+  --down-soft: #10251c;
+
+  --accent: #4d9bff;
+  --accent-soft: #14273f;
+  --warn: #e3a13c;
+  --warn-soft: #2a2113;
+
+  --shadow: 0 2px 20px rgba(0, 0, 0, .62);
+  --shadow-pop: 0 16px 44px rgba(0, 0, 0, .66);
+}
+
+/* ---------- 基础 ---------- */
+* { box-sizing: border-box; }
+
+/* 只要设了 hidden 就一定不显示（display:grid/flex 会盖掉浏览器默认值） */
+[hidden] { display: none !important; }
+
+html, body { margin: 0; padding: 0; height: 100%; }
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  /* 页面本身不滚动：滚动交给窗口内部的内容容器，避免出现两层滚动条 */
+  overflow: hidden;
+  transition: background-color .18s ease, color .18s ease;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数字统一等宽，价格跳动时不会左右晃 */
+.num, .price, .pill, .idx-price, .idx-pct, .kt-row b, .ki b { font-variant-numeric: tabular-nums; }
+.price, .idx-price, .pill, .kt-row b { font-family: var(--font-num); }
+
+/* ---------- 控件 ---------- */
+button, select, input, textarea {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+}
+button, select {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 7px;
+  padding: 5px 11px;
+  cursor: pointer;
+  transition: background-color .14s ease, border-color .14s ease, color .14s ease;
+}
+button:hover:not(:disabled), select:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+button:disabled { opacity: .5; cursor: default; }
+button.danger { background: var(--up-soft); border-color: var(--up); color: var(--up); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { filter: brightness(1.1); color: #fff; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+input[type="text"], input[type="number"], input:not([type]) {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 7px;
+  padding: 5px 9px;
+  color: var(--text);
+  min-width: 0;
+}
+input::placeholder { color: var(--dim); }
+input[type="checkbox"] { accent-color: var(--accent); }
+
+/* 开关（设置弹窗 / 提醒窗口共用） */
+.switch { position: relative; display: inline-block; width: 36px; height: 20px; flex: none; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.switch .track {
+  position: absolute; inset: 0; cursor: pointer;
+  background: var(--panel-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  transition: background-color .16s ease, border-color .16s ease;
+}
+.switch .track::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--muted);
+  transition: transform .16s ease, background-color .16s ease;
+}
+.switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .track::after { transform: translateX(16px); background: #fff; }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- 滚动条 ---------- */
+/* 不要写 scrollbar-width / scrollbar-color —— Chromium 收到标准属性会忽略下面这套 ::-webkit-scrollbar */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 9px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+::-webkit-scrollbar-button, ::-webkit-scrollbar-corner { display: none; width: 0; height: 0; background: transparent; }
+
+/* ---------- 涨跌色 ---------- */
+.pct-up { color: var(--up); }
+.pct-down { color: var(--down); }
+.up { color: var(--up); }
+.down { color: var(--down); }
+
+/* ---------- toast ---------- */
+#toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(10px);
+  z-index: 9000; max-width: 88%;
+  padding: 8px 14px; border-radius: 9px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-pop);
+  font-size: 12px; opacity: 0; pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }

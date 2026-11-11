@@ -8,7 +8,7 @@ const INDICES = [
   { id: 'csi300', name: '沪深300', code: '000300', market: 'CN', exchange: 'SH' },
   { id: 'csi500', name: '中证500', code: '000905', market: 'CN', exchange: 'SH' },
   { id: 'csi1000', name: '中证1000', code: '000852', market: 'CN', exchange: 'SH' },
-  { id: 'csi2000', name: '中证2000', code: '932000', market: 'CN', exchange: 'SH' },
+  { id: 'csi2000', name: '中证2000', code: '932000', market: 'CN', exchange: 'SH', secid: '2.932000' },
   { id: 'sse50', name: '上证50', code: '000016', market: 'CN', exchange: 'SH' },
   { id: 'szse50', name: '深证50', code: '399850', market: 'CN', exchange: 'SZ' },
   { id: 'bse50', name: '北证50', code: '899050', market: 'CN', exchange: 'BJ' },
@@ -22,6 +22,7 @@ function defaultSettings() {
   return {
     schemaVersion: 1,
     main: {
+      // 默认跟随系统；深色「监控面板」风格在设置里一键可切
       theme: 'system',
       refreshIntervalSeconds: 3,
       // 只在 A 股交易时段请求：收盘/午休/周末/节假日不打接口，收盘后补一次快照

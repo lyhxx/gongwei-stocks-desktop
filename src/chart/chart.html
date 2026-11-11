@@ -3,23 +3,56 @@
 <head>
 <meta charset="UTF-8" />
 <title>K线</title>
+<link rel="stylesheet" href="../shared/theme.css" />
+<link rel="stylesheet" href="../shared/chrome.css" />
 <link rel="stylesheet" href="./chart.css" />
 </head>
-<body>
-<div class="kline-tabs" id="klineTabs">
-  <button data-period="trend" class="active">分时</button>
-  <button data-period="day">日K</button>
-  <button data-period="week">周K</button>
-  <button data-period="month">月K</button>
-  <span class="kline-title" id="klineTitle"></span>
+<body class="framed">
+<div class="win">
+
+  <header class="win-title">
+    <div class="title-left">
+      <span class="app-name">K线</span>
+      <span class="kline-title" id="klineTitle"></span>
+    </div>
+    <div class="title-center"></div>
+    <div class="title-right">
+      <div class="win-btns">
+        <button data-win-btn="minimize" title="最小化">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><line x1="1" y1="5" x2="9" y2="5" /></svg>
+        </button>
+        <button data-win-btn="close" class="close" title="关闭">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><line x1="1.5" y1="1.5" x2="8.5" y2="8.5" /><line x1="8.5" y1="1.5" x2="1.5" y2="8.5" /></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <div class="kline-tabs" id="klineTabs">
+    <button data-period="trend" class="active">分时</button>
+    <button data-period="day">日K</button>
+    <button data-period="week">周K</button>
+    <button data-period="month">月K</button>
+  </div>
+  <div class="kline-info" id="klineInfo"></div>
+  <div class="kline-chart-wrap">
+    <div id="klineChart" class="kline-chart"></div>
+    <!-- 主图与成交量副图之间的一行：悬停时显示该点的成交量 -->
+    <div class="vol-label" id="volLabel">成交量</div>
+  </div>
 </div>
-<div class="kline-info" id="klineInfo"></div>
-<div class="kline-chart-wrap">
-  <div id="klineChart" class="kline-chart"></div>
-  <!-- 主图与成交量副图之间的一行：悬停时显示该点的成交量 -->
-  <div class="vol-label" id="volLabel">成交量</div>
-</div>
+
+<div class="win-resize" data-resize="n"></div>
+<div class="win-resize" data-resize="s"></div>
+<div class="win-resize" data-resize="w"></div>
+<div class="win-resize" data-resize="e"></div>
+<div class="win-resize" data-resize="nw"></div>
+<div class="win-resize" data-resize="ne"></div>
+<div class="win-resize" data-resize="sw"></div>
+<div class="win-resize" data-resize="se"></div>
+
 <script src="../vendor/echarts.min.js"></script>
+<script src="../shared/chrome.js"></script>
 <script src="./chart.js"></script>
 </body>
 </html>

@@ -7,12 +7,18 @@ const { JSDOM } = require('jsdom');
 const root = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'src', 'renderer', 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(root, 'src', 'renderer', 'app.js'), 'utf8');
+const chromeJs = fs.readFileSync(path.join(root, 'src', 'shared', 'chrome.js'), 'utf8');
 const fhtml = fs.readFileSync(path.join(root, 'src', 'float', 'float.html'), 'utf8');
 const fjs = fs.readFileSync(path.join(root, 'src', 'float', 'float.js'), 'utf8');
 const chtml = fs.readFileSync(path.join(root, 'src', 'chart', 'chart.html'), 'utf8');
 const cjs = fs.readFileSync(path.join(root, 'src', 'chart', 'chart.js'), 'utf8');
 const ahtml = fs.readFileSync(path.join(root, 'src', 'alert', 'alert.html'), 'utf8');
 const ajs = fs.readFileSync(path.join(root, 'src', 'alert', 'alert.js'), 'utf8');
+
+// 样式要按真实加载顺序注入：共享主题 → 共享装饰层 → 窗口自己的样式
+// （jsdom 不解析外链 CSS，这一层专门用来抓「display:grid 盖掉 hidden」这类真实浏览器才有的 bug）
+const cssFiles = ['src/shared/theme.css', 'src/shared/chrome.css', 'src/renderer/styles.css'];
+const combinedCss = cssFiles.map((f) => fs.readFileSync(path.join(root, f), 'utf8')).join('\n');
 
 const store = {
   schemaVersion: 1,
@@ -57,26 +63,26 @@ let reorderCalls = [];
 let indexReorderCalls = [];
 let chartOpens = [];
 let alertOpens = [];
+const winCalls = [];   // 无边框窗口控制（最小化/最大化/关闭/缩放）的调用记录
+let sessionGetCalls = 0;   // 渲染层主动拉取时段状态的次数
 const diagMock = {
   source: 'none',
   errors: [
     'eastmoney: 600000=timeout 4000ms @push2delay.eastmoney.com/api/qt/stock/get',
     'fetchSina: https:timeout 5000ms @hq.sinajs.cn/list=sh600000',
-    'fetchTencent: https:timeout 5000ms @qt.gtimg.cn/q=sh600000',
   ],
 };
 const dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only' });
 const { window } = dom;
 // 把样式表注入文档，才能用 getComputedStyle 验证 hidden 是否真的生效
-// （jsdom 不解析外链 CSS，这一层专门用来抓「display:grid 盖掉 hidden」这类真实浏览器才有的 bug）
-const css = fs.readFileSync(path.join(root, 'src', 'renderer', 'styles.css'), 'utf8');
 const styleTag = window.document.createElement('style');
-styleTag.textContent = css;
+styleTag.textContent = combinedCss;
 window.document.head.appendChild(styleTag);
 window.gongwei = {
   getStore: async () => JSON.parse(JSON.stringify(store)),
   getVersion: async () => 'test',
   getMarket: async () => JSON.parse(JSON.stringify(marketData)),
+  getSession: async () => { sessionGetCalls += 1; return { phase: 'closed', day: '2026-11-10', nextChangeAt: 0, trading: false, label: '已收盘' }; },
   refreshMarket: async () => ({}),
   search: async () => searchMock,
   addStock: async () => ({}),
@@ -131,9 +137,16 @@ window.gongwei = {
   onStore: (cb) => { listeners.store = cb; },
   onAlert: (cb) => { listeners.alert = cb; },
   onFloatSync: (cb) => { listeners.floatSync = cb; },
+  // ---------- 无边框窗口控制 ----------
+  winMinimize: async () => { winCalls.push('minimize'); return true; },
+  winClose: async () => { winCalls.push('close'); return true; },
+  winState: async () => ({ maximized: false }),
+  winResize: (payload) => { winCalls.push({ resize: payload }); },
+  onWinState: (cb) => { listeners.winState = cb; },
 };
 window.matchMedia = () => ({ matches: false, addEventListener: () => {} });
 dom.window.eval(appJs);
+dom.window.eval(chromeJs);   // 无边框装饰层（标题栏按钮 / 缩放手柄）
 
 let passed = 0;
 let failed = 0;
@@ -642,6 +655,74 @@ async function runQueued() {  for (const item of queued) {
     assert.ok(!d.querySelector('.kline-modal'), '不应再弹主窗口弹窗');
   });
 
+  console.log('[无边框窗口]');
+  t('标题栏有最小化/关闭两个按钮（没有最大化，对小工具没用）', () => {
+    const btns = [...d.querySelectorAll('.win-title [data-win-btn]')];
+    assert.deepStrictEqual(btns.map((b) => b.getAttribute('data-win-btn')), ['minimize', 'close']);
+    assert.ok(d.querySelector('.win'), '应有窗口外壳');
+  });
+  t('点窗口按钮会调对应的主进程接口', async () => {
+    winCalls.length = 0;
+    d.querySelector('[data-win-btn="minimize"]').click();
+    d.querySelector('[data-win-btn="close"]').click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepStrictEqual([...winCalls], ['minimize', 'close']);
+  });
+  t('拖缩放手柄会上报方向与位移', async () => {
+    winCalls.length = 0;
+    const handle = d.querySelector('.win-resize[data-resize="se"]');
+    assert.ok(handle, '应有缩放手柄');
+    const mk = (type, x, y) => {
+      const Ctor = typeof window.PointerEvent === 'function' ? window.PointerEvent : window.MouseEvent;
+      return new Ctor(type, { bubbles: true, button: 0, clientX: x, clientY: y, pointerId: 7, isPrimary: true });
+    };
+    handle.dispatchEvent(mk('pointerdown', 100, 100));
+    window.dispatchEvent(mk('pointermove', 140, 175));
+    await new Promise((r) => setTimeout(r, 40));
+    window.dispatchEvent(mk('pointerup', 140, 175));
+    const call = winCalls.find((c) => c && c.resize);
+    assert.ok(call, '应调用 winResize');
+    assert.strictEqual(call.resize.dir, 'se');
+    assert.strictEqual(call.resize.dx, 40);
+    assert.strictEqual(call.resize.dy, 75);
+  });
+  t('系统最大化时（Win+↑ / 拖到顶部）去掉圆角', () => {
+    assert.ok(!d.documentElement.classList.contains('win-maximized'));
+    listeners.winState({ maximized: true });
+    assert.ok(d.documentElement.classList.contains('win-maximized'), '铺满时应加 win-maximized');
+    listeners.winState({ maximized: false });
+    assert.ok(!d.documentElement.classList.contains('win-maximized'));
+  });
+  t('状态灯在标题栏里，点它能开诊断', () => {
+    const dot = d.getElementById('btnStatusDot');
+    assert.ok(dot, '状态灯应在标题栏');
+    assert.strictEqual(dot.closest('.win-title') !== null, true, '状态灯应位于标题栏内');
+  });
+  t('胶囊悬停能看到三个市场各自的状态', () => {
+    listeners.session({
+      phase: 'closed', trading: false, label: '已收盘',
+      cn: { label: '已收盘' }, hk: { label: '港股交易中' }, us: { label: '美股周末休市' },
+    });
+    const pill = d.getElementById('sessionPill');
+    assert.ok(pill.title.includes('A股'), pill.title);
+    assert.ok(pill.title.includes('港股'), pill.title);
+    assert.ok(pill.title.includes('美股'), pill.title);
+  });
+  t('启动后主动拉一次时段状态（不能只靠推送）', async () => {
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(sessionGetCalls >= 1, '渲染层启动时应主动拉一次时段状态，否则胶囊会停在 --');
+  });
+  t('交易时段胶囊会跟着 session 推送刷新', () => {
+    const pill = d.getElementById('sessionPill');
+    assert.ok(pill, '标题栏应有时段胶囊');
+    listeners.session({ phase: 'lunch', trading: false, label: '午间休市' });
+    assert.strictEqual(pill.textContent, '午间休市', '胶囊文案应随 session 推送更新');
+    assert.ok(pill.className.includes('rest'), '休市时是 rest 样式');
+    listeners.session({ phase: 'morning', trading: true, label: '交易中' });
+    assert.strictEqual(pill.textContent, '交易中');
+    assert.ok(pill.className.includes('live'), '交易中是 live 样式');
+  });
+
   // 所有用例注册完毕后再串行跑异步用例；queue 里若还有剩余说明有用例被漏跑，必须报错
   await runQueued();
   if (queued.some((q) => !q.done)) {
@@ -682,7 +763,8 @@ async function runQueued() {  for (const item of queued) {
     assert.ok(!/collapsed/.test(css), '收起态样式应删除');
   });
   ft('主界面只有一层滚动条、且提醒输入框不撑破网格', () => {
-    const css = fs.readFileSync(path.join(root, 'src', 'renderer', 'styles.css'), 'utf8');
+    // 注意：要连共享主题层一起看（body{overflow:hidden} 现在放在 shared/theme.css）
+    const css = combinedCss;
     // 自选不再自己滚动，滚动统一交给 .app-body，避免展开时出现两条滚动条
     assert.ok(/\.app-body\s*\{[^}]*overflow-y:\s*auto/.test(css), '.app-body 应是唯一滚动容器');
     assert.ok(/body\s*\{[^}]*overflow:\s*hidden/s.test(css), '页面本身不应滚动');
@@ -692,6 +774,9 @@ async function runQueued() {  for (const item of queued) {
     assert.ok(!/scrollbar-color\s*:/.test(css), '不能写 scrollbar-color，否则自定义滚动条失效');
     assert.ok(/::-webkit-scrollbar\s*\{/.test(css), '应有自定义滚动条样式');
     assert.ok(/\.row-actions\s*\{/.test(css), '行尾图标分组样式应存在');
+    // 设置弹窗有五组，内容比弹窗高；保存按钮必须吸附在底部，
+    // 否则会被推到滚动区末尾 —— 用户改了主题却点不到「保存设置」，表现为「改不了」
+    assert.ok(/\.set-footer\s*\{[^}]*position:\s*sticky/s.test(css), '保存设置按钮必须 sticky 吸附在底部');
   });
 
   console.log('[K线窗口]');

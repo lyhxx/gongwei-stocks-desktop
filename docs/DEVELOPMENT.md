@@ -23,9 +23,10 @@
 ```
 ┌──────────────────────── 主进程 src/main.js ────────────────────────┐
 │  electron-store（唯一数据源）                                       │
-│  轮询定时器 ─→ providers 三路并行 ─→ 合并 ─→ 广播 market:update     │
+│  轮询定时器 ─→ providers 两路并行 ─→ 合并 ─→ 广播 market:update     │
 │  告警判定 ─→ 桌面通知 / 声音 / 渲染层高亮                            │
 │  托盘（提示与轮播）· 全局热键 · 浮窗尺寸自适应                        │
+│  窗口控制 ─→ 无边框窗口的最小化 / 关闭 / 缩放（win:* 通道）           │
 └───┬────────────┬───────────┬───────────┬──────────────────────┐
     │ preload.js │           │           │
     │            │           │           │
@@ -38,9 +39,16 @@
 ```
 
 * **四个窗口共用同一个 `preload.js`**，暴露面收敛在 `window.gongwei`，渲染层没有任何 Node 能力（`contextIsolation: true`、`nodeIntegration: false`）。
+* **四个窗口都是无边框窗口**（`frame: false` + `transparent: true`），标题栏由 `src/shared/chrome.css` + `chrome.js` 统一提供：
+  - 圆角 + 1px 描边，**不做外投影**：透明窗口的绘制范围就是窗口矩形，`box-shadow` 溢出部分会被裁掉；为了「画得出来」把窗口开大一圈，阴影反而被裁成一圈生硬的暗边。现在窗口 = 内容，边距为 0；
+  - 透明窗口**不能**再 `setBackgroundColor`，否则透明区被填实、圆角外露直角；
+  - 标题栏只有「最小化 / 关闭到托盘」两个按钮；铺满用 Windows 自己的 Win+↑ 或拖到屏幕顶部，检测到窗口已铺满工作区后去掉圆角；
+  - 缩放手柄只报「方向 + 位移」，bounds 怎么改由主进程算（`applyWinResize`）。手柄压在内容最外圈 4px，标题栏 z-index 更高，所以标题栏那一条是拖动、窗口按钮也点得到。
+* **浮窗是例外**：它压在别的窗口上面，窗口必须等于内容（否则四周透明边会挡住下面的窗口点击），所以浮窗没有那圈透明边距，阴影也会被裁掉，靠描边立体。
+* **共享装饰层不许用 id**：同一份 `chrome.js` 要跑在四个窗口里，一律用 `[data-win-btn]` / `[data-resize]` 属性选择器，否则 `test/audit.js` 的元素引用检查会误报。
 * K 线窗口独立于主窗口：主窗口只发 `chart:open`，窗口自己用 `chart:stock` 取当前标的、监听 `chart:update` 切换；这样图表不受主窗口尺寸/滚动限制，可自由缩放。
 * 提醒窗口同理：主窗口只发 `alert:open`，窗口用 `alert:stock` 取标的、监听 `alert:update`；改动防抖即时保存（`stocks:update-alert`），行内不再展开配置。
-* 主窗口关闭 = 隐藏到托盘（`app.quitting` 标记区分真正退出）。
+* 主窗口关闭 = 隐藏到托盘（`app.quitting` 标记区分真正退出），标题栏的 `✕` 走同一条路径。
 * 单实例锁：第二次启动会唤醒已有窗口，不会起两个进程。
 
 ## 3. 数据流
@@ -53,9 +61,10 @@
 | --- | --- |
 | `common/http.js` | 统一请求出口，可注入实现，带超时 |
 | `common/proxy.js` | 代理模式兜底、手工代理地址校验、`resolveProxy` 结果转人话 |
-| `common/market-hours.js` | 交易时段 / 交易日判断，以及「这次 tick 做什么」的调度决策 |
+| `common/market-hours.js` | 交易时段 / 交易日判断（A股 / 港股 / 美股三条轨）与调度决策 |
 | `common/version.js` | 版本号解析比较、从 Release 里挑下载资产 |
 | `common/order.js` | 自选与指数排序校验（拖拽落库前调用） |
+| `common/alerts.js` | 提醒条件判定（纯函数，主进程只提供行情与历史采样） |
 
 ### 3.1 行情调度
 
@@ -68,8 +77,17 @@ scheduleTick → tick()
 ```
 
 * 调度用 `setTimeout` 链而非 `setInterval`，睡多久由 `planTick` 决定，且**上限 60 秒**——休市期间每 60 秒只醒来判断一次状态（不发网络请求），这样改设置或系统时间变化能快速生效。
+* **A 股、港股、美股各有一条轨**：`sessionPhase(date, 'CN' | 'HK')` 与 `usSessionPhase(date)`。
+  - A 股 09:15–11:30 / 13:00–15:00，港股 09:30–12:00 / 13:00–16:00
+  - 美股 21:30–04:00（夏令时）/ 22:30–05:00（冬令时），**横跨北京时间的两个日历日**
+* **美股的三个坑**：
+  1. 夏令时（3 月第二个周日 ↔ 11 月第一个周日）会让开盘收盘时间差一小时，必须自动切换；
+  2. 一个「美股交易日」按**开始那天**算，所以北京时间周六凌晨（美东周五下午）仍在交易，周六晚上才是周末；
+  3. 收盘快照窗口（04:00–04:30）归属的是**昨晚开始**那个交易日，别记成当天。
+* `planTick` 的判定顺序：**任一市场在交易 → fetch**（三路并行本来就一次带全部标的，不拆多次）→ 再看收盘快照（CN / HK / US 各记各的）→ 都没有就睡到最近一次状态变化。
+* 港股轨 / 美股轨只在自选里真的有对应市场的标的时启用（`state.hasHK` / `state.hasUS`），没有就完全走原来的 A 股逻辑，零额外行为。
 * 交易时段与交易日一律按**北京时间**判断（`Intl.DateTimeFormat` + `timeZone: 'Asia/Shanghai'`），与本机时区无关。
-* 法定节假日表在 `market-hours.js` 的 `CN_HOLIDAYS`，每年官方安排公布后更新该处即可；多列几天只是少发几个请求，漏列只是多发几个请求（数据本身不变），不会漏数据。
+* 法定节假日表在 `market-hours.js` 的 `CN_HOLIDAYS` / `HK_HOLIDAYS`，每年官方安排公布后更新该处即可；多列几天只是少发几个请求，漏列只是多发几个请求（数据本身不变），不会漏数据。港股表尤其要保守：误填一个交易日会真的丢掉那天的数据。
 * 冷启动会先 `refreshMarket('init')` 拉一次，保证已收盘时界面也有上一笔收盘价。
 
 ### 3.2 行情取数
@@ -78,7 +96,7 @@ scheduleTick → tick()
 refreshMarket(reason)
   └─ doRefreshMarket(gen++)
        ├─ 组装 stocks + 勾选的 indexStocks
-       ├─ 三路并行：fetchEastmoney / fetchSina / fetchTencent
+       ├─ 两路并行：fetchEastmoney(批量) / fetchSina(批量)
        │    每路 resolve 就 mergeQuoteRows 合并并广播一次   ← 谁快谁先画（渐进式首屏）
        ├─ 丢弃过期轮次（gen !== refreshGen 时直接 return）
        ├─ backfillNames 回填纯代码添加的股票名称
@@ -89,8 +107,22 @@ refreshMarket(reason)
 **关键点**
 
 * `refreshing` 防止自动轮询叠加；`refreshGen` 防止手动刷新的旧响应覆盖新数据。
-* `mergeQuoteRows` 按 `stockId` 逐只取第一个 `ok` 的结果，所以来源可能是 `eastmoney+tencent` 混合。
+* `mergeQuoteRows` 按 `stockId` 逐只取第一个 `ok` 的结果，所以来源可能是 `eastmoney+sina` 混合。
 * 合并结果与 `indexMeta` 一起放进 `lastQuotes`，通过 `market:update` 推给两个窗口。
+* **两路都是批量接口**：东财 `ulist.np/get?secids=...`、新浪 `list=...`，
+  一轮刷新只发 **2 个请求**（早先是「东财逐只 N 个 + 新浪 1 个 + 腾讯 1 个」≈23 个）。
+  字段口径和东财单只接口不同，注意对照：
+  | 含义 | 批量 `ulist.np` | 单只 `stock/get` |
+  | --- | --- | --- |
+  | 最新价 / 涨跌幅 / 涨跌额 | `f2` / `f3` / `f4` | `f43` / `f170` / `f169` |
+  | 量 / 额 / 高 / 低 / 开 / 昨收 | `f5` / `f6` / `f15` / `f16` / `f17` / `f18` | `f47` / `f48` / `f44` / `f45` / `f46` / `f60` |
+  | 名称 / 代码 / 市场 | `f14` / `f12` / `f13` | `f58` / — / `f107` |
+* 批量接口**没有** `f59`（精度）和 `f50`（量比）：
+  - 精度用 `classifyCode()` 兜底（A股 2 / 港美股 3 / 基金债 3 / 板块 2，与 `f59` 一致）；
+  - 量比只有**开了「成交量异动」提醒**的股票才单独再取一次单只接口（通常 0~1 只）。
+* 批量接口挂了会自动退回逐只请求（自带备用域名），单只接口也用于取量比。
+* 美股市场号猜错时，**所有候选 secid 放进同一个批量请求**，接口只返回有数据的那行，
+  命中后写进 `usSecidCache`，下次就只带一个。
 
 ### 3.3 搜索
 
@@ -148,10 +180,23 @@ refreshMarket(reason)
 
 | 目标 | 规则 | 示例 |
 | --- | --- | --- |
-| 东财 secid | SH→`1.`，SZ/BJ→`0.`，HK→`116.`，US→`100.` | `1.600000` |
+| 东财 secid | SH→`1.`，SZ/BJ→`0.`，HK→`116.`，US→`105/106/107`，板块→`90.` | `1.600000` |
 | 腾讯 / 新浪 | `sh/sz/bj/hk/us` + 代码 | `hk00700`（不是 `hkex`） |
 
-搜索结果的 `sourceIds.eastmoney` 优先于推断，添加自选时一并保存，避免北证/港股/美股漂移。
+搜索结果的 `sourceIds.eastmoney` 优先于推断，添加自选时一并保存，避免北证/港股/美股漂移。板块从东财搜到时 `QuoteID` 就是 `90.BK0475`，`sourceIds` 直接可用。
+
+美股的市场号跟着交易所走，**没有 `100` 这个市场号**（写死会拿到 `rc:100` 空数据）：
+
+| 交易所 | 腾讯后缀 | 东财市场号 |
+| --- | --- | --- |
+| 纳斯达克 | `.oq` | `105.` |
+| 纽交所 | `.n` | `106.` |
+| AMEX / ARCA | `.am` | `107.` |
+| 场外 OTCBB | `.ps` | `153.` |
+
+腾讯 smartbox 返回的美股代码自带后缀（`aapl.oq`），靠它反推市场号；东财 suggest 直接给 `QuoteID`（`105.AAPL`）最准。`usSuffix` 要存进自选数据，缺了只能按纳斯达克猜。
+
+**猜错了要能自愈**：`eastmoneySecidCandidates()` 会按 105→106→107→153 的顺序给候选，接口返回「空数据」就换下一个候选（网络错误则换域名），命中后写进 `usSecidCache`，下次就只发一个请求。K线 / 分时 / 明细走同一套候选逻辑。
 
 ### 4.2 东财字段与精度（易错）
 
@@ -165,9 +210,11 @@ refreshMarket(reason)
 
 返回体里的中文是**字面量 `\uXXXX` 转义串**（6 个 ASCII 字符），必须 `unescapeUnicode` 解码，否则界面显示 `\u6d66...`。单测用 `String.raw` 还原 wire 数据，不要直接写 `\u6d66`（JS 会提前解析，掩盖 bug）。
 
-### 4.4 新浪 GBK
+### 4.4 新浪 GBK 与港股字段
 
 `hq.sinajs.cn` 与 `suggest3` 可能返回 GBK。`decodeAuto` 的处理顺序：UTF-8 解出替换符 → 用 GBK；UTF-8 无中文但有非 ASCII 且 GBK 有中文 → 用 GBK；否则 UTF-8。原因见代码注释（部分 GBK 字节恰好也是合法 UTF-8）。
+
+**新浪港股的字段布局和 A 股不一样**：`hk00700` 是「英文名,中文名,今开,昨收,最高,最低,现价,...」，现价在 `parts[6]`；A 股现价在 `parts[3]`。`parseSinaLine` 按 symbol 前缀分派，取错位置会把昨收当现价显示。
 
 ### 4.5 新增一个行情通道
 
@@ -206,6 +253,16 @@ refreshMarket(reason)
 | `diagnose()` | `diagnose` | 通道状态与报错 |
 | `selftest()` | `selftest` | 九探针并行实测 |
 | `onMarket` / `onStore` / `onAlert` | `market:update` / `store:changed` / `alert:trigger` | 主进程推送 |
+
+无边框窗口控制（`src/shared/chrome.js` 用，四个窗口共用）：
+
+| 桥接方法 | 通道 | 说明 |
+| --- | --- | --- |
+| `winMinimize()` | `win:minimize` | 最小化 |
+| `winClose()` | `win:close` | 收进托盘（不退出） |
+| `winState()` | `win:state` | 取当前是否铺满 |
+| `winResize({dir,dx,dy})` | `win:resize` | 缩放手柄上报方向与位移 |
+| `onWinState(cb)` | `win:state` | 主进程推送铺满状态 |
 
 另有 `applyProxy()`（`proxy:apply`）、`testProxy()`（`proxy:test`）、`checkUpdate()`（`update:check`）、
 `openExternal(url)`（`open:external`）；单向推送还有 `onSession`（`session:update`）、
@@ -260,7 +317,11 @@ refreshMarket(reason)
   4. 换位动画用 `element.animate()`，并在重排前统一 `cancel()` 掉容器内所有在播动画后再测量坐标，避免动画偏移被叠加进下一次测量。
   另外：同一时刻只允许一个拖拽、只认主指针（`isPrimary === false` 才拒绝，缺省放行以便测试环境只有 `MouseEvent`）、触摸必须从 `.drag-handle` 起拖（触摸事件的 `button` 也是 0，光靠 button 判断拦不住）。
 * **请求一律走 `common/http.js`**：`test/audit.js` 会拦截 `providers.js` 里的裸 `fetch(`，否则换成 `net.fetch` 后代理就不生效了。
-* **主题要同时改原生层**：只改 CSS 变量的话，Windows 标题栏不会变。`applyNativeTheme()` 设置 `nativeTheme.themeSource`，并只给**有系统边框的主窗口**刷 `backgroundColor`——透明浮窗一旦被设成不透明底色，透明区会被填实、圆角外露出直角（`test/audit.js` 有静态检查）。
+* **主题要同时改原生层**：只改 CSS 变量的话，Windows 标题栏不会变。`applyNativeTheme()` 设置 `nativeTheme.themeSource`；无边框窗口没有系统标题栏，但渲染层的 `prefers-color-scheme` 仍跟着 `nativeTheme` 走，深色模式照样生效。
+* **共享装饰层（`src/shared/`）**：`theme.css` 放设计变量与基础控件，`chrome.css` 放窗口外壳，`chrome.js` 放标题栏按钮与缩放手柄行为。四个窗口都引入同一套，深浅色、圆角、描边、标题栏只有一份实现。
+* **窗口尺寸要把 padding 算进去**：`frameSize(w, h)` = 可见内容 + `WIN_PAD * 2`。渲染层报的是内容尺寸，主进程加 padding 后再 `setBounds`。
+* **窗口里的 `position: fixed` 弹层**（设置/诊断）必须在 `.win` 之内，否则会盖到窗口外面的透明边距上。
+* **设置弹窗的保存按钮要 `position: sticky`**：设置项有五组、内容比弹窗高，按钮一旦被推到滚动区末尾，用户改了主题却点不到「保存设置」，就表现为「主题改不了」。`test/dom.test.js` 有静态检查守着这条。
 * **浮窗先定尺寸再显示**：`show: false` 创建，等渲染层回报内容高度、尺寸设好后再 `showInactive()`，否则会先出现再跳一下；另有 800ms 兜底防止渲染异常时窗口不可见。
 * **浮窗右键菜单**：拦截 `floatWin.webContents` 的 `context-menu` 事件，弹出自己的菜单（刷新 / 显示主窗口 / 设置 / 隐藏 / 停用 / 退出）。
 
@@ -315,10 +376,10 @@ npm test
 各文件具体覆盖：
 
 * **`scripts/validate-build-config.js`** — 用 electron-builder 官方 schema 校验 `build` 字段，拦截非法字段（如曾经的 `build.zip`）、重复或含非 ASCII 的产物命名、清单里不存在的资源与图标
-* **`test/audit.js`** — `$('id')` 引用的元素是否存在、桥接方法与 IPC 通道是否一一对应、内置指数 id 与前端中文名映射是否齐全、声明了 `display` 的元素是否有 `[hidden]` 同伴、是否误开 `nodeIntegration`、README 是否链接到文档
-* **`test/providers.test.js`** — smartbox `\uXXXX` 转义、GBK 自动识别、新浪/腾讯行解析、secid 与精度换算、品种归类（股票/基金/可转债）、版本比较，以及 mock fetch 下的三路合并、搜索兜底顺序、K线/分时/明细解析、交易时段与调度决策
+* **`test/audit.js`** — `$('id')` 引用的元素是否存在、桥接方法与 IPC 通道是否一一对应、内置指数 id 与前端中文名映射是否齐全、声明了 `display` 的元素是否有 `[hidden]` 同伴、是否误开 `nodeIntegration`、README 是否链接到文档，以及**无边框相关**的静态检查（必须 `frame: false` + `transparent: true`，且不得给透明窗口刷 `backgroundColor`，四个窗口都要引用共享主题层与装饰层）
+* **`test/providers.test.js`** — smartbox `\uXXXX` 转义、GBK 自动识别、新浪/腾讯行解析（**港股字段分派**）、secid 与精度换算、品种归类（股票/基金/可转债/**港股/板块/美股**）、版本比较，以及 mock fetch 下的三路合并、搜索兜底顺序、K线/分时/明细解析、交易时段与调度决策（**A 股 / 港股 / 美股三条轨**）
 * **`test/alerts.test.js`** — 提醒判定：上破/下跌价、涨幅/跌幅（含负值取绝对值）、各板块涨跌停（10/20/30）、量比异动、N 分钟急涨急跌（注入历史采样）、未启用/无行情不触发
-* **`test/dom.test.js`** — jsdom 真跑：卡片渲染、铃铛开/关、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗开合、设置页分组与开关、联想下拉、拖拽（含多指针与触摸场景）、状态栏休市文案、浮窗、K线窗口、提醒窗口回填与保存
+* **`test/dom.test.js`** — jsdom 真跑：卡片渲染、铃铛开/关、指数勾选即时生效、管理面板开合、`getComputedStyle` 验证 `hidden` 真的不显示、弹窗开合、设置页分组与开关、联想下拉、拖拽（含多指针与触摸场景）、状态栏休市文案、浮窗、K线窗口、提醒窗口回填与保存，以及**无边框窗口**（标题栏按钮、缩放手柄上报方向与位移、铺满状态类名、状态灯位置）
 
 添加用例的原则：**优先用能复现真实 bug 的输入**。
 
@@ -351,4 +412,16 @@ npm test
 * **不要引入 `undici` 做代理** — Electron 33 内置 Node 20.18，`require('undici')`（6.28+）直接抛 `webidl.util.markAsUncloneable is not a function`；ProxyAgent 也不能跨版本喂给全局 fetch。用 `net.fetch` + `session.setProxy`
 * **浮窗收起/展开靠程序化 `setContentSize`** — `resizable:false` 的无边框透明窗口在 Windows 上仍可被程序缩放（已实测 46×46 ↔ 250×360）
 * **搜索主通道 smartbox 的类型字段** — A股是 `GP-A`、港美股是 `GP`、场内基金是 `ETF`、场外基金是 `KJ*`（`jj` 市场），早期只放行 `/^GP/` 会把 ETF 全部丢掉
+* **无边框窗口的阴影要自己画** — transparent 窗口的绘制范围就是窗口矩形，`box-shadow` 溢出部分会被裁掉；主窗口靠「窗口比内容大一圈 `--win-pad`」腾出画布，浮窗因为不能有透明边距而放弃阴影
+* **无边框窗口不要加外阴影** — 透明窗口的绘制范围就是窗口矩形，`box-shadow` 溢出部分会被裁掉；留边距当画布又会被裁成一圈生硬的暗边（像「窗口外面糊了一块」）。`test/audit.js` 有静态检查守着这条。
+* **窗口 = 内容，不留透明边距** — 那圈边距会挡住点击，没有阴影就纯属浪费；缩放手柄改为压在内容最外圈 4px，标题栏 z-index 更高所以不挡窗口按钮。
+* **透明窗口不能再刷 `backgroundColor`** — 会把透明区填实、圆角外露出直角（浮窗踩过这个坑），所以四个窗口统一不设底色
+* **最大化交给系统** — 不用原生 `maximize` 也不用自绘铺满：transparent 窗口在 Windows 上原生最大化容易出黑底；改成用 Win+↑ / 拖到顶部，检测到铺满工作区后由渲染层去掉圆角
+* **港股新浪字段与 A 股不同** — 现价在 `parts[6]`，A 股在 `parts[3]`，解析时必须按 symbol 前缀分派，否则会把昨收当现价
+* **新浪美股是第三套布局** — 前缀 `gb_`（不是 `us_`），现价 `parts[1]`、涨跌幅 `parts[2]`、涨跌额 `parts[4]`
+* **东财美股没有 `100` 市场号** — 只有 `105`（纳斯达克）/ `106`（纽交所）/ `107`（AMEX）/ `153`（OTCBB），写死 `100` 会拿到 `rc:100` 空数据
+* **美股在腾讯/新浪要带前缀** — 腾讯 `usAAPL.OQ`、新浪 `gb_aapl`，不带就查不到
+* **东财板块只有东财有** — 新浪/腾讯通道必须显式跳过板块，否则会拼出 `shbk0475` 这种不存在的 symbol 白白发请求
+* **港股节假日表要保守** — 漏列只是多发几个请求（无害），误填一个交易日会真的丢掉那天的数据
+* **浮窗窗口必须等于内容** — 四周多一圈透明边就会挡住下面窗口的点击（项目踩过这个坑），所以浮窗不能用主窗口那套 padding 模型
 

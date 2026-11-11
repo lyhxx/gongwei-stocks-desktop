@@ -3,7 +3,7 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, globalShortcut, s
 const path = require('path');
 const Store = require('electron-store');
 const { INDICES, defaultState, blankAlert } = require('./common/defaults');
-const { fetchEastmoney, fetchSina, fetchTencent, searchStocks, selfTest, classifyCode, connectivityTest, mergeQuoteRows, fetchKline, fetchTrends, fetchStockDetail } = require('./common/providers');
+const { fetchEastmoney, fetchSina, searchStocks, selfTest, classifyCode, connectivityTest, mergeQuoteRows, fetchKline, fetchTrends, fetchStockDetail } = require('./common/providers');
 const { setFetchImpl, fetchWithTimeout } = require('./common/http');
 const { normalizeProxyMode, normalizeProxyRules, describeResolvedProxy } = require('./common/proxy');
 const { isNewer, pickDownloadAsset } = require('./common/version');
@@ -13,6 +13,12 @@ const { checkAlerts, fmtPct } = require('./common/alerts');
 
 const store = new Store({ name: 'gongwei-stocks', defaults: defaultState() });
 ensureDefaults();
+
+// ---------- 无边框窗口框架 ----------
+// 窗口本体是 transparent 的，圆角靠渲染层画（见 src/shared/chrome.css）。
+// 不做外阴影：透明窗口的绘制范围就是窗口矩形，阴影溢出部分会被裁掉，
+// 为了「画得出来」把窗口开大一圈，结果阴影被裁成一圈生硬的暗边（像糊了一块）。
+// 现在窗口 = 内容，边缘只留 1px 描边。
 
 let mainWin = null;
 let floatWin = null;
@@ -28,33 +34,17 @@ function getState() {
 }
 
 // ---------- 主题 ----------
-// 界面里的深浅色只影响网页内部，Windows 的原生标题栏需要靠 nativeTheme 才会跟着变；
-// 同时把窗口底色也同步，避免切主题时先闪一下白底
+// 界面里的深浅色只影响网页内部；Windows 原生控件（托盘、输入框、滚动条）
+// 靠 nativeTheme 才会跟着变。
 function effectiveTheme() {
   const t = (getState().settings.main && getState().settings.main.theme) || 'system';
   if (t === 'dark' || t === 'light') return t;
   return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
 }
 
-function themeBackground(theme) {
-  return theme === 'dark' ? '#0f141b' : '#f1f5f9';
-}
-
-// 只给「有系统边框的主窗口」刷底色。
-// 浮窗是 transparent 窗口，一旦被设成不透明底色，透明区就会被填实，
-// Windows 会给它画一圈直角阴影，圆角外面就会露出直角（曾踩过）
-function syncWindowBackground() {
-  const bg = themeBackground(effectiveTheme());
-  // 只给有系统边框的窗口刷底色（主窗口、K 线/提醒窗口）；透明浮窗不能设，否则圆角外露直角
-  for (const w of [mainWin, chartWin, alertWin]) {
-    if (w && !w.isDestroyed()) w.setBackgroundColor(bg);
-  }
-}
-
 function applyNativeTheme() {
   const t = (getState().settings.main && getState().settings.main.theme) || 'system';
   nativeTheme.themeSource = t === 'dark' ? 'dark' : (t === 'light' ? 'light' : 'system');
-  syncWindowBackground();
 }
 
 // 存量配置兜底：electron-store 的 defaults 只是浅合并，老版本写的 store 可能缺新字段，
@@ -333,13 +323,26 @@ async function refreshMarket(reason = 'auto') {
   }
 }
 
-// 渐进式行情：三路并行，每路回来立刻合并广播一次（谁快谁先画），
+// 渐进式行情：两路并行，每路回来立刻合并广播一次（谁快谁先画），
 // 最后再收尾（补空错误、回填名称、告警、托盘）。弱网下首屏从等最慢变成等最快。
+//
+// 通道分工：
+//   东财  主力。走批量接口（一次请求拿全部标的），美股/板块只有它有
+//   新浪  备份。东财抽风时顶上（它一次也能拿全部）
 const QUOTE_PROVIDERS = [
-  ['eastmoney', fetchEastmoney],
+  ['eastmoney', (stocks) => fetchEastmoney(stocks, { volumeRatioIds: volumeRatioIdsOf(stocks) })],
   ['sina', fetchSina],
-  ['tencent', fetchTencent],
 ];
+
+// 量比（f50）只有东财单只接口有，而「成交量异动」提醒要用它。
+// 批量接口拿不到，所以只给**开了这类提醒的股票**单独再取一次（通常 0~1 只）。
+function volumeRatioIdsOf(stocks) {
+  const ids = new Set();
+  for (const s of stocks || []) {
+    if (s && s.alert && s.alert.enabled && s.alert.volumeAnomaly) ids.add(s.id);
+  }
+  return ids;
+}
 
 async function doRefreshMarket(reason = 'auto') {
   const gen = ++refreshGen;
@@ -347,7 +350,12 @@ async function doRefreshMarket(reason = 'auto') {
   const stocks = st.stocks || [];
   const selectedIndices = (st.settings.indices && st.settings.indices.selected) || [];
   const indexStocks = INDICES.filter((i) => selectedIndices.includes(i.id))
-    .map((i) => ({ id: `index:${i.id}`, code: i.code, name: i.name, market: i.market, exchange: i.exchange }));
+    .map((i) => ({
+      id: `index:${i.id}`, code: i.code, name: i.name,
+      market: i.market, exchange: i.exchange,
+      // 少数指数的东财 secid 不能按交易所推（中证2000 是 2.932000）
+      secid: i.secid || '',
+    }));
   const all = [...stocks, ...indexStocks];
   const indexMeta = indexStocks.map((i) => ({ stockId: i.id, code: i.code, name: i.name }));
   if (!all.length) {
@@ -407,11 +415,49 @@ function broadcastMarket() {
 // 收盘 / 午休 / 周末 / 节假日一律不发请求；15:00~15:30 留一个快照窗口，
 // 保证收盘后仍能拿到当天最后一条数据。定时器最多睡 60 秒，便于设置变更后快速响应。
 let smartTimer = null;
-let closeSnapshotDay = '';              // 已经补抓过收盘快照的交易日
+let closeSnapshotDay = '';              // A 股收盘快照已抓过的交易日
+let hkCloseSnapshotDay = '';            // 港股收盘快照已抓过的交易日
+let usCloseSnapshotDay = '';            // 美股收盘快照已抓过的交易日
 let sessionInfo = { phase: 'closed', day: '', nextChangeAt: 0 };
+let hkSessionInfo = null;               // 港股时段（自选里没有港股时一直是 null）
+let usSessionInfo = null;               // 美股时段（自选里没有美股时一直是 null）
+
+// 时段状态给界面的载荷
+function buildSessionPayload() {
+  const cnLabel = describePhase(sessionInfo.phase);
+  const hkTrading = !!(hkSessionInfo && hkSessionInfo.trading);
+  const usTrading = !!(usSessionInfo && usSessionInfo.trading);
+  // A 股在交易就报 A 股状态；A 股歇着但港股/美股还在交易，报对应市场的状态
+  let label = cnLabel;
+  if (!sessionInfo.trading) {
+    if (hkTrading) label = '港股交易中';
+    else if (usTrading) label = '美股交易中';
+    else {
+      // 都不在交易时，A 股的「未开盘 / 已收盘」比较笼统；
+      // 港美股如果是周末或节假日休市，那条信息对持仓更有用（说明价格停在上一交易日）
+      const cnGeneric = sessionInfo.phase === 'before-open' || sessionInfo.phase === 'closed';
+      const hkRest = hkSessionInfo && (hkSessionInfo.phase === 'weekend' || hkSessionInfo.phase === 'holiday');
+      const usRest = usSessionInfo && (usSessionInfo.phase === 'weekend' || usSessionInfo.phase === 'holiday');
+      if (cnGeneric && hkRest) label = describePhase(hkSessionInfo.phase, 'HK');
+      else if (cnGeneric && usRest) label = describePhase(usSessionInfo.phase, 'US');
+    }
+  }
+  return {
+    ...sessionInfo,
+    label,
+    trading: !!(sessionInfo.trading || hkTrading || usTrading),
+    cn: { phase: sessionInfo.phase, label: cnLabel, trading: !!sessionInfo.trading },
+    hk: hkSessionInfo
+      ? { phase: hkSessionInfo.phase, label: describePhase(hkSessionInfo.phase, 'HK'), trading: !!hkSessionInfo.trading }
+      : null,
+    us: usSessionInfo
+      ? { phase: usSessionInfo.phase, label: describePhase(usSessionInfo.phase, 'US'), trading: !!usSessionInfo.trading }
+      : null,
+  };
+}
 
 function broadcastSession() {
-  const payload = { ...sessionInfo, label: describePhase(sessionInfo.phase) };
+  const payload = buildSessionPayload();
   for (const w of [mainWin, floatWin]) {
     if (w && !w.isDestroyed()) w.webContents.send('session:update', payload);
   }
@@ -423,9 +469,13 @@ function scheduleTick(ms) {
 }
 
 async function tick() {
-  const cfg = getState().settings.main || {};
+  const st = getState();
+  const cfg = st.settings.main || {};
+  // 自选里有港股/美股才开对应那条轨：没有就完全走原来的 A 股逻辑，零额外行为
+  const hasHK = (st.stocks || []).some((s) => s.market === 'HK');
+  const hasUS = (st.stocks || []).some((s) => s.market === 'US');
   // 该不该请求、下一次睡多久，全部由纯函数决定（见 common/market-hours.js，有单测覆盖）
-  const plan = planTick(cfg, new Date(), { closeSnapshotDay });
+  const plan = planTick(cfg, new Date(), { closeSnapshotDay, hkCloseSnapshotDay, usCloseSnapshotDay, hasHK, hasUS });
 
   if (plan.info) {
     const changed = plan.info.phase !== sessionInfo.phase || plan.info.day !== sessionInfo.day;
@@ -438,10 +488,37 @@ async function tick() {
     broadcastSession();
   }
 
+  // 港股时段：港股 15:00-16:00 还在交易，A 股已经收市，这段时间照样要刷
+  if (plan.hkInfo) {
+    const hkChanged = !hkSessionInfo
+      || plan.hkInfo.phase !== hkSessionInfo.phase
+      || plan.hkInfo.day !== hkSessionInfo.day;
+    hkSessionInfo = plan.hkInfo;
+    if (hkChanged) broadcastSession();
+  } else if (hkSessionInfo) {
+    hkSessionInfo = null;
+    broadcastSession();
+  }
+
+  // 美股时段：美股是北京时间的晚上到次日凌晨，夏令时还要跟着切换
+  if (plan.usInfo) {
+    const usChanged = !usSessionInfo
+      || plan.usInfo.phase !== usSessionInfo.phase
+      || plan.usInfo.day !== usSessionInfo.day;
+    usSessionInfo = plan.usInfo;
+    if (usChanged) broadcastSession();
+  } else if (usSessionInfo) {
+    usSessionInfo = null;
+    broadcastSession();
+  }
+
   if (plan.action === 'fetch') {
     await refreshMarket('auto');
   } else if (plan.action === 'snapshot') {
-    closeSnapshotDay = plan.info.day;   // 当天只补抓一次
+    // A 股、港股、美股的收盘快照各记各的，否则 15:10 抓完 A 股就把港股 16:00 的快照也压掉了
+    if (plan.market === 'HK') hkCloseSnapshotDay = plan.hkInfo.day;
+    else if (plan.market === 'US') usCloseSnapshotDay = plan.usInfo.day;
+    else closeSnapshotDay = plan.info.day;
     await refreshMarket('close');
   }
   scheduleTick(plan.delay);
@@ -484,17 +561,36 @@ function startBadgeRotate() {
 // ---------- 窗口 ----------
 const APP_ICON = path.join(__dirname, '..', 'build', 'icon.png');
 
+// 无边框窗口的公共参数：
+// - frame:false 关掉系统标题栏与边框，标题栏自己画；
+// - transparent:true 才能看到圆角（不透明窗口按矩形绘制，圆角外会是直角）；
+// - hasShadow:false 关掉系统阴影（transparent 窗口的系统阴影也不显示）。
+function framedOptions(opts) {
+  return {
+    ...opts,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    autoHideMenuBar: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  };
+}
+
 function createMainWindow() {
-  mainWin = new BrowserWindow({
+  mainWin = new BrowserWindow(framedOptions({
     width: 420,
     height: 640,
+    minWidth: 340,
+    minHeight: 430,
     title: '工位看盘',
     icon: APP_ICON,
-    autoHideMenuBar: true,
-    backgroundColor: themeBackground(effectiveTheme()),
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
-  });
+    show: false, // 等首帧画完再显示，否则会闪一下空壳
+  }));
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWin.once('ready-to-show', () => { if (mainWin && !mainWin.isDestroyed()) mainWin.show(); });
+  // 兜底：万一 ready-to-show 没触发，也不能让窗口一直不出现
+  setTimeout(() => { if (mainWin && !mainWin.isDestroyed() && !mainWin.isVisible()) mainWin.show(); }, 800);
   mainWin.on('close', (e) => {
     // 关闭进托盘，不退出（摸鱼刚需）
     if (!app.quitting) {
@@ -503,6 +599,71 @@ function createMainWindow() {
     }
   });
   mainWin.on('closed', () => { mainWin = null; });
+  mainWin.on('resize', () => scheduleWinState(mainWin));
+  mainWin.on('move', () => scheduleWinState(mainWin));
+}
+
+// ---------- 无边框窗口控制 ----------
+// 标题栏只留「最小化 / 关闭到托盘」两个按钮：最大化对这种小工具用处不大。
+// 要铺满就用 Windows 自己的 Win+↑ 或拖到屏幕顶部（系统行为）——
+// 下面的 isWinMaximized 检测到窗口已铺满工作区后，会让渲染层去掉圆角。
+function workAreaOf(win) {
+  try {
+    return screen.getDisplayMatching(win.getBounds()).workArea;
+  } catch {
+    return screen.getPrimaryDisplay().workArea;
+  }
+}
+
+// 窗口是否已铺满工作区（含 Windows 贴靠后的最大化状态）
+function isWinMaximized(win) {
+  if (!win || win.isDestroyed()) return false;
+  const b = win.getBounds();
+  const wa = workAreaOf(win);
+  return Math.abs(b.x - wa.x) <= 2 && Math.abs(b.y - wa.y) <= 2
+    && Math.abs(b.width - wa.width) <= 2 && Math.abs(b.height - wa.height) <= 2;
+}
+
+function pushWinState(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.webContents.send('win:state', { maximized: isWinMaximized(win) });
+  } catch { /* 窗口正在销毁 */ }
+}
+
+// 尺寸/位置变化很密集（拖动时每帧都来），延迟一点再同步状态，避免抖
+function scheduleWinState(win) {
+  setTimeout(() => pushWinState(win), 120);
+}
+
+// 拖边缘缩放：渲染层只报「方向 + 位移」，bounds 怎么改由主进程算
+// （方向与位移分离，渲染层不必知道窗口在哪、多大）
+function applyWinResize(win, payload) {
+  if (!win || win.isDestroyed() || !payload) return;
+  const dir = String(payload.dir || '');
+  const dx = Number(payload.dx) || 0;
+  const dy = Number(payload.dy) || 0;
+  const b = win.getBounds();
+  const min = win.getMinimumSize();
+  const minW = Math.max(min[0] || 0, 240);
+  const minH = Math.max(min[1] || 0, 200);
+  let { x, y, width, height } = b;
+  if (dir.includes('e')) width = b.width + dx;
+  if (dir.includes('s')) height = b.height + dy;
+  if (dir.includes('w')) { width = b.width - dx; x = b.x + dx; }
+  if (dir.includes('n')) { height = b.height - dy; y = b.y + dy; }
+  if (width < minW) { if (dir.includes('w')) x -= (minW - width); width = minW; }
+  if (height < minH) { if (dir.includes('n')) y -= (minH - height); height = minH; }
+  // 别把窗口拖到屏幕外面去
+  const wa = workAreaOf(win);
+  if (width > wa.width) width = wa.width;
+  if (height > wa.height) height = wa.height;
+  if (x < wa.x) x = wa.x;
+  if (y < wa.y) y = wa.y;
+  if (x + width > wa.x + wa.width) x = wa.x + wa.width - width;
+  if (y + height > wa.y + wa.height) y = wa.y + wa.height - height;
+  win.setBounds({ x, y, width, height });
+  scheduleWinState(win);
 }
 
 function floatPosition(width, height) {
@@ -664,19 +825,18 @@ let chartWin = null;
 let chartStock = null;
 
 function createChartWindow() {
-  const win = new BrowserWindow({
+  const win = new BrowserWindow(framedOptions({
     width: 780,
-    height: 560,
+    height: 600,
     minWidth: 560,
     minHeight: 380,
     title: 'K线',
     icon: APP_ICON,
-    autoHideMenuBar: true,
-    backgroundColor: themeBackground(effectiveTheme()),
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
-  });
+  }));
   win.loadFile(path.join(__dirname, 'chart', 'chart.html'));
   win.on('closed', () => { if (chartWin === win) chartWin = null; });
+  win.on('resize', () => scheduleWinState(win));
+  win.on('move', () => scheduleWinState(win));
   return win;
 }
 
@@ -698,19 +858,18 @@ let alertWin = null;
 let alertStock = null;
 
 function createAlertWindow() {
-  const win = new BrowserWindow({
+  const win = new BrowserWindow(framedOptions({
     width: 560,
     height: 740,
     minWidth: 460,
     minHeight: 480,
     title: '价格提醒',
     icon: APP_ICON,
-    autoHideMenuBar: true,
-    backgroundColor: themeBackground(effectiveTheme()),
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
-  });
+  }));
   win.loadFile(path.join(__dirname, 'alert', 'alert.html'));
   win.on('closed', () => { if (alertWin === win) alertWin = null; });
+  win.on('resize', () => scheduleWinState(win));
+  win.on('move', () => scheduleWinState(win));
   return win;
 }
 
@@ -761,6 +920,10 @@ function registerIpc() {
   ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('market:get', () => lastQuotes);
   ipcMain.handle('market:refresh', () => refreshMarket('manual'));
+  // 时段状态：主动拉一次。
+  // 推送只在时段「变化」时发生，而首次推送发生在首个 tick —— 那时页面还没加载完，
+  // 消息会丢；不主动拉一次，标题栏的时段胶囊就会一直停在「--」。
+  ipcMain.handle('session:get', () => buildSessionPayload());
   ipcMain.handle('diagnose', () => ({
     source: lastQuotes.source,
     updatedAt: lastQuotes.updatedAt,
@@ -795,6 +958,32 @@ function registerIpc() {
   ipcMain.handle('selftest', () => selfTest());
   ipcMain.handle('search', (_e, keyword) => searchStocks(String(keyword || '').trim(), 10));
 
+  // ---------- 无边框窗口控制 ----------
+  // 用 fromWebContents 反查发起方，这样主窗口 / K线 / 提醒窗口共用同一套处理，
+  // 不用为每个窗口各注册一遍。
+  ipcMain.handle('win:minimize', (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (w) w.minimize();
+    return true;
+  });
+  ipcMain.handle('win:close', (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (!w) return true;
+    // 主窗口收进托盘（不退出）；K线 / 提醒窗口是真的关掉，
+    // 否则图表窗口的 5s/30s 定时刷新会在看不见的时候继续跑
+    if (w === mainWin) w.hide();
+    else w.close();
+    return true;
+  });
+  ipcMain.handle('win:state', (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    return { maximized: w ? isWinMaximized(w) : false };
+  });
+  ipcMain.on('win:resize', (e, payload) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    applyWinResize(w, payload);
+  });
+
   // K 线 / 分时：按前端传回的自选描述（含 secid 线索的 sourceIds）取历史数据
   ipcMain.handle('kline:get', (_e, { stock, period, limit } = {}) => fetchKline(stock || {}, period, limit));
   ipcMain.handle('trends:get', (_e, stock) => fetchTrends(stock || {}));
@@ -819,6 +1008,8 @@ function registerIpc() {
       exchange,
       securityType: item.securityType || classifyCode(code).securityType,
       sourceIds: item.sourceIds || {},
+      // 美股要记住交易所后缀（.oq/.n/.am），东财 secid 的市场号靠它推断
+      usSuffix: item.usSuffix || '',
       order: st.stocks.length,
       badgeEnabled: true,
       alert: blankAlert(),
@@ -1012,8 +1203,7 @@ if (!gotLock) {
     Menu.setApplicationMenu(null);
     registerIpc();
     applyNativeTheme(); // 先定好深浅色，再开窗口，免得标题栏先白一下
-    // 跟随系统时，Windows 切换深浅色要同步窗口底色（原生标题栏由 nativeTheme 自动跟）
-    nativeTheme.on('updated', () => syncWindowBackground());
+    // 系统深浅色切换不用额外通知：渲染层自己监听 prefers-color-scheme 的 change 事件
     // 先把网络层准备好（net.fetch + 代理策略），再发第一批行情
     await setupNetwork();
     createMainWindow();

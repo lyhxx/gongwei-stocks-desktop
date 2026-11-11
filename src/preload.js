@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('gongwei', {
   getStore: () => ipcRenderer.invoke('store:get'),
   getVersion: () => ipcRenderer.invoke('app:version'),
   getMarket: () => ipcRenderer.invoke('market:get'),
+  getSession: () => ipcRenderer.invoke('session:get'),
   refreshMarket: () => ipcRenderer.invoke('market:refresh'),
   search: (keyword) => ipcRenderer.invoke('search', keyword),
   addStock: (item) => ipcRenderer.invoke('stocks:add', item),
@@ -40,4 +41,11 @@ contextBridge.exposeInMainWorld('gongwei', {
   onOpenSettings: (cb) => ipcRenderer.on('ui:open-settings', () => cb()),
   onStore: (cb) => ipcRenderer.on('store:changed', (_e, data) => cb(data)),
   onAlert: (cb) => ipcRenderer.on('alert:trigger', (_e, data) => cb(data)),
+
+  // ---------- 无边框窗口控制（主窗口 / K线 / 提醒窗口共用） ----------
+  winMinimize: () => ipcRenderer.invoke('win:minimize'),
+  winClose: () => ipcRenderer.invoke('win:close'),
+  winState: () => ipcRenderer.invoke('win:state'),
+  winResize: (payload) => ipcRenderer.send('win:resize', payload),
+  onWinState: (cb) => ipcRenderer.on('win:state', (_e, data) => cb(data)),
 });

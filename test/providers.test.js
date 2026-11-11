@@ -71,7 +71,7 @@ async function okAsync(name, fn) {
     assert.ok(Number.isNaN(P.numScale(undefined, 100)));
   });
 
-  console.log('[4] 新浪 / 腾讯行解析');
+  console.log('[4] 新浪行解析');
   ok('新浪行', () => {
     const p = P.parseSinaLine('var hq_str_sh600000="PF,7.79,7.80,7.85,7.90,7.78,0";');
     assert.ok(Math.abs(p.latestPrice - 7.85) < 1e-9);
@@ -80,11 +80,6 @@ async function okAsync(name, fn) {
     assert.strictEqual(P.parseSinaLine('var hq_str_sh600000="";'), null);
     assert.strictEqual(P.parseSinaLine('nope'), null);
   });
-  ok('腾讯行', () => {
-    const p = P.parseTencentLine('v_sh600000="1~N~600000~7.85~7.79~0.06~0~0~0~";');
-    assert.ok(Math.abs(p.latestPrice - 7.85) < 1e-9);
-  });
-  ok('腾讯脏数据', () => assert.strictEqual(P.parseTencentLine('v_sh600000="1~x";'), null));
 
   console.log('[5] 新浪 / 雪球搜索解析');
   ok('新浪 suggest', () => {
@@ -102,59 +97,68 @@ async function okAsync(name, fn) {
     assert.strictEqual(P.decodeAuto(Buffer.from('hello茅台', 'utf8')), 'hello茅台');
   });
 
-  console.log('[6] 联调：三通道分别取数 + 合并（mock fetch）');
+  console.log('[6] 联调：东财批量 + 新浪备份（mock fetch）');
   const realFetch = global.fetch;
-  await okAsync('东财补 A、腾讯补 B，新浪挂掉不影响整体', async () => {
+  await okAsync('新浪挂掉不影响整体，东财批量一次拿全', async () => {
     global.fetch = async (url) => {
       const u = String(url);
-      if (u.includes('push2')) {
-        const secid = (u.match(/secid=([^&]*)/) || [])[1] || '';
-        if (secid.includes('600000')) {
-          return { ok: true, status: 200, json: async () => ({ data: { f43: 785, f60: 780, f169: 5, f170: 64, f58: '浦发银行', f59: 2 } }) };
-        }
-        return { ok: true, status: 200, json: async () => ({ data: {} }) };
+      if (u.includes('ulist.np')) {
+        // 批量接口：一次返回全部标的（f2=最新价 f3=涨跌幅 f4=涨跌额 f18=昨收）
+        return { ok: true, status: 200, json: async () => ({ data: { diff: [
+          { f13: 1, f12: '600000', f14: '浦发银行', f2: 7.85, f3: 0.64, f4: 0.05, f5: 100, f6: 1000, f15: 7.9, f16: 7.78, f17: 7.79, f18: 7.80 },
+          { f13: 0, f12: '000001', f14: '平安银行', f2: 10.0, f3: 1.01, f4: 0.1, f5: 200, f6: 2000, f15: 10.1, f16: 9.9, f17: 9.95, f18: 9.9 },
+        ] } }) };
+      }
+      if (u.includes('stock/get')) {
+        return { ok: true, status: 200, json: async () => ({ data: { f43: 785, f60: 780, f169: 5, f170: 64, f58: '浦发银行', f59: 2 } }) };
       }
       if (u.includes('sinajs')) throw new Error('mock sina down');
-      if (u.includes('qt.gtimg')) {
-        return { ok: true, status: 200, arrayBuffer: async () => Buffer.from('v_sh600000="1~N~600000~7.85~7.79~0.06~0~0~0~";v_sz000001="1~N~000001~10.00~9.90~0.10~0~0~0~";', 'latin1') };
-      }
       throw new Error('unexpected url ' + u);
     };
     const stocks = [
       { id: 'a', code: '600000', name: '浦发银行', market: 'CN', exchange: 'SH' },
       { id: 'b', code: '000001', name: '平安银行', market: 'CN', exchange: 'SZ' },
     ];
-    // 主进程就是「三通道并行 + mergeQuoteRows 按只合并」，这里用同一套纯函数复现
-    const settled = await Promise.allSettled([
-      P.fetchEastmoney(stocks), P.fetchSina(stocks), P.fetchTencent(stocks),
-    ]);
+    // 主进程就是「两通道并行 + mergeQuoteRows 按只合并」，这里用同一套纯函数复现
+    const settled = await Promise.allSettled([P.fetchEastmoney(stocks), P.fetchSina(stocks)]);
     assert.strictEqual(settled[1].status, 'rejected', '新浪应失败');
     const groups = settled.map((s) => (s.status === 'fulfilled' ? s.value : []));
     const { rows, source } = P.mergeQuoteRows(stocks, groups);
     assert.strictEqual(rows.length, 2);
     assert.ok(rows.every((r) => r.ok), '两只都应有值');
-    assert.ok(source.includes('eastmoney') && source.includes('tencent'), '来源应合并：' + source);
+    assert.ok(source.includes('eastmoney'), '来源应合并：' + source);
+    assert.strictEqual(rows[0].latestPrice, 7.85, '批量接口 f2 才是最新价');
+    assert.strictEqual(rows[0].changePercent, 0.64);
+    assert.strictEqual(rows[0].decimals, 2, '小数位按品种兜底');
+  });
+  await okAsync('批量接口挂了会自动退回逐只请求', async () => {
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('ulist.np')) throw new Error('batch down');
+      return { ok: true, status: 200, json: async () => ({ data: { f43: 785, f60: 780, f169: 5, f170: 64, f58: '浦发银行', f59: 2 } }) };
+    };
+    const [row] = await P.fetchEastmoney([{ id: 'a', code: '600000', name: '浦发银行', market: 'CN', exchange: 'SH' }]);
+    assert.strictEqual(row.ok, true, '退回逐只后仍应有数据');
+    assert.strictEqual(row.latestPrice, 7.85);
   });
   await okAsync('全部通道挂掉：合并后 ok=false、来源 none', async () => {
     global.fetch = async () => { throw new Error('net down'); };
     const stocks = [{ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' }];
-    const settled = await Promise.allSettled([
-      P.fetchEastmoney(stocks), P.fetchSina(stocks), P.fetchTencent(stocks),
-    ]);
+    const settled = await Promise.allSettled([P.fetchEastmoney(stocks), P.fetchSina(stocks)]);
     const groups = settled.map((s) => (s.status === 'fulfilled' ? s.value : []));
     const { rows, source } = P.mergeQuoteRows(stocks, groups);
     assert.strictEqual(source, 'none');
     assert.strictEqual(rows[0].ok, false);
   });
-  await okAsync('东财缺 f59 时用 f152 定精度', async () => {
+  await okAsync('东财缺 f59 时用 f152 定精度（单只接口）', async () => {
     global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: { f43: 7850, f60: 7800, f169: 50, f170: 64, f58: 'X', f152: 3 } }) });
-    const [row] = await P.fetchEastmoney([{ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' }]);
+    const row = await P.fetchOneEastmoney({ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' });
     assert.strictEqual(row.latestPrice, 7.85, '应按 f152=3 除以 1000');
     assert.strictEqual(row.decimals, 3);
   });
   await okAsync('f59/f152 都缺时按 A 股默认除以 100（空值不能被当成 0 位小数）', async () => {
     global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: { f43: 785, f60: 780, f169: 5, f170: 64, f58: 'X' } }) });
-    const [row] = await P.fetchEastmoney([{ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' }]);
+    const row = await P.fetchOneEastmoney({ id: 'a', code: '600000', name: 'X', market: 'CN', exchange: 'SH' });
     assert.strictEqual(row.latestPrice, 7.85, '应按默认 100 换算，而不是除以 1');
     assert.strictEqual(row.decimals, 2);
   });
@@ -485,6 +489,247 @@ async function okAsync(name, fn) {
     ] };
     assert.strictEqual(V.pickDownloadAsset(rel).name, 'gongwei-1.2.0-portable.exe');
     assert.strictEqual(V.pickDownloadAsset({ assets: [] }), null);
+  });
+
+  console.log('[13] 港股与东财板块');
+  ok('新浪港股行：现价在 parts[6]（A 股是 parts[3]）', () => {
+    // 港股：英文名,中文名,今开,昨收,最高,最低,现价,涨跌额,涨跌幅,...
+    const p = P.parseSinaLine('var hq_str_hk00700="TENCENT,腾讯控股,423.000,418.400,424.400,415.400,418.000,-0.400,-0.096";');
+    assert.strictEqual(p.latestPrice, 418, '现价应取 parts[6]；取 parts[3] 会把昨收当现价');
+    assert.ok(Math.abs(p.changePercent - (-0.0957)) < 0.01);
+  });
+  ok('新浪 A 股行：仍然是 parts[3]=现价', () => {
+    const p = P.parseSinaLine('var hq_str_sh600000="PF,7.79,7.80,7.85,7.90,7.78,0";');
+    assert.ok(Math.abs(p.latestPrice - 7.85) < 1e-9);
+  });
+  ok('港股代码：5 位数字、3 位小数', () => {
+    const t = (c) => { const k = P.classifyCode(c); return `${k.exchange}/${k.securityType}/${k.decimals}`; };
+    assert.strictEqual(t('00700'), 'HKEX/stock/3');
+    assert.strictEqual(t('09988'), 'HKEX/stock/3');
+  });
+  ok('板块代码：BK+4 位', () => {
+    const t = (c) => { const k = P.classifyCode(c); return `${k.exchange}/${k.securityType}/${k.decimals}`; };
+    assert.strictEqual(t('BK0475'), 'BOARD/board/2');
+    assert.strictEqual(t('bk0475'), 'BOARD/board/2');
+  });
+  ok('东财 secid：板块 90.、港股 116.', () => {
+    assert.strictEqual(P.eastmoneySecid({ code: 'BK0475', market: 'BOARD', exchange: 'BOARD' }), '90.BK0475');
+    assert.strictEqual(P.eastmoneySecid({ code: '00700', market: 'HK', exchange: 'HKEX' }), '116.00700');
+    assert.strictEqual(
+      P.eastmoneySecid({ code: 'BK0475', market: 'BOARD', sourceIds: { eastmoney: '90.BK0475' } }),
+      '90.BK0475',
+    );
+  });
+  ok('东财 suggest：板块识别成 BOARD/board、港股识别成 HK', () => {
+    const b = P.marketFromSuggest({ QuoteID: '90.BK0475', Classify: 'BK', Code: 'BK0475' });
+    assert.strictEqual(b.market, 'BOARD');
+    assert.strictEqual(b.exchange, 'BOARD');
+    assert.strictEqual(P.typeFromSuggest({ Classify: 'BK', SecurityTypeName: '板块' }), 'board');
+    assert.strictEqual(P.marketFromSuggest({ QuoteID: '116.00700', Classify: 'HK', Code: '00700' }).market, 'HK');
+  });
+  ok('纯代码直通：BK 板块 / 5 位港股', () => {
+    const b = P.directCodeCandidate('BK0475');
+    assert.strictEqual(b.market, 'BOARD');
+    assert.strictEqual(b.securityType, 'board');
+    const h = P.directCodeCandidate('00700');
+    assert.strictEqual(h.market, 'HK');
+    assert.strictEqual(h.exchange, 'HKEX');
+  });
+  await okAsync('新浪通道跳过板块（它没有 BK 标的）', async () => {
+    const urls = [];
+    global.fetch = async (url) => {
+      urls.push(String(url));
+      return { ok: true, status: 200, arrayBuffer: async () => Buffer.from('', 'latin1') };
+    };
+    const boards = [{ id: 'b1', code: 'BK0475', name: '银行Ⅱ', market: 'BOARD', exchange: 'BOARD' }];
+    const rows = await P.fetchSina(boards);
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].ok, false, '板块不该从新浪取到值');
+    assert.ok(!urls.some((u) => /bk0475/i.test(u)), '不该为板块拼 symbol：' + urls.join(','));
+  });
+
+  console.log('[14] 港股交易时段');
+  const hkAt = (iso) => M.sessionPhase(new Date(iso), 'HK');
+  ok('港股 10:00 在交易', () => {
+    assert.strictEqual(hkAt('2026-09-18T02:00:00Z').trading, true);
+  });
+  ok('港股 15:30 还在交易（A 股已经收市）', () => {
+    const s = hkAt('2026-09-18T07:30:00Z');
+    assert.strictEqual(s.trading, true);
+    assert.strictEqual(s.phase, 'afternoon');
+  });
+  ok('港股 16:10 进收盘快照窗口', () => {
+    const s = hkAt('2026-09-18T08:10:00Z');
+    assert.strictEqual(s.snapshotDue, true);
+    assert.strictEqual(s.phase, 'after-close');
+  });
+  ok('港股节假日休市', () => {
+    assert.strictEqual(hkAt('2026-01-01T02:00:00Z').phase, 'holiday');
+    assert.strictEqual(M.isTradingDay(new Date('2026-01-01T02:00:00Z'), 'HK'), false);
+    assert.strictEqual(M.isTradingDay(new Date('2026-01-01T02:00:00Z'), 'CN'), false);
+  });
+  ok('调度：港股 15:30 继续请求（A 股已收）', () => {
+    const cfg = { marketHoursOnly: true, refreshIntervalSeconds: 3 };
+    assert.strictEqual(M.planTick(cfg, new Date('2026-09-18T07:30:00Z'), { hasHK: true }).action, 'fetch');
+    assert.strictEqual(M.planTick(cfg, new Date('2026-09-18T07:30:00Z'), {}).action, 'idle', '没有港股自选就不开港股轨');
+  });
+  ok('调度：港股收盘快照单独记一次', () => {
+    const cfg = { marketHoursOnly: true, refreshIntervalSeconds: 3 };
+    const p1 = M.planTick(cfg, new Date('2026-09-18T08:10:00Z'), { hasHK: true });
+    assert.strictEqual(p1.action, 'snapshot');
+    assert.strictEqual(p1.market, 'HK');
+    const p2 = M.planTick(cfg, new Date('2026-09-18T08:10:00Z'), { hasHK: true, hkCloseSnapshotDay: '2026-09-18' });
+    assert.strictEqual(p2.action, 'idle', '同一天不重复抓');
+  });
+
+  console.log('[15] 美股');
+  ok('smartbox 美股：剥掉交易所后缀并记住它', () => {
+    const r = P.parseSmartbox('v_hint="us~aapl.oq~苹果~pg~GP"');
+    assert.strictEqual(r[0].code, 'AAPL');
+    assert.strictEqual(r[0].market, 'US');
+    assert.strictEqual(r[0].usSuffix, 'OQ', '要记住交易所后缀，否则推不出东财 secid');
+  });
+  ok('东财 secid：美股按交易所映射市场号（100 是不存在的）', () => {
+    assert.strictEqual(P.eastmoneySecid({ code: 'AAPL', market: 'US', usSuffix: 'OQ' }), '105.AAPL');
+    assert.strictEqual(P.eastmoneySecid({ code: 'BABA', market: 'US', usSuffix: 'N' }), '106.BABA');
+    assert.strictEqual(P.eastmoneySecid({ code: 'AMDC', market: 'US', usSuffix: 'AM' }), '107.AMDC');
+    // 没有后缀时按纳斯达克兜底
+    assert.strictEqual(P.eastmoneySecid({ code: 'AAPL', market: 'US' }), '105.AAPL');
+    // 有 sourceIds 时优先用它（东财搜索来的最准）
+    assert.strictEqual(
+      P.eastmoneySecid({ code: 'BABA', market: 'US', usSuffix: 'OQ', sourceIds: { eastmoney: '106.BABA' } }),
+      '106.BABA',
+    );
+  });
+  ok('腾讯 / 新浪的美股代码格式', () => {
+    assert.strictEqual(P.tencentSymbol({ code: 'AAPL', market: 'US', usSuffix: 'OQ' }), 'usAAPL.OQ');
+    assert.strictEqual(P.tencentSymbol({ code: 'BABA', market: 'US', usSuffix: 'N' }), 'usBABA.N');
+    // 新浪美股前缀是 gb_（不是 us_），且不带交易所后缀
+    assert.strictEqual(P.sinaSymbol({ code: 'AAPL', market: 'US', usSuffix: 'OQ' }), 'gb_aapl');
+  });
+  ok('新浪美股行：现价在 parts[1]、涨跌幅在 parts[2]', () => {
+    const p = P.parseSinaLine('var hq_str_gb_aapl="苹果,350.6900,2.43,2026-11-10 09:42:58,8.3200,344.9950";');
+    assert.strictEqual(p.latestPrice, 350.69);
+    assert.strictEqual(p.changePercent, 2.43);
+    assert.strictEqual(p.changeAmount, 8.32);
+  });
+  ok('美股代码识别：字母代码、3 位小数', () => {
+    const t = (c) => { const k = P.classifyCode(c); return `${k.exchange}/${k.securityType}/${k.decimals}`; };
+    assert.strictEqual(t('AAPL'), 'OTHER_US/stock/3');
+    assert.strictEqual(t('NVDA'), 'OTHER_US/stock/3');
+  });
+  ok('纯代码直通：美股字母代码', () => {
+    const u = P.directCodeCandidate('AAPL');
+    assert.strictEqual(u.market, 'US');
+    assert.strictEqual(u.usSuffix, 'OQ');
+  });
+  ok('东财 suggest 的美股：QuoteID 反推交易所后缀', () => {
+    const m = P.marketFromSuggest({ QuoteID: '106.BABA', Classify: 'UsStock', Code: 'BABA' });
+    assert.strictEqual(m.market, 'US');
+    assert.strictEqual(m.exchange, 'OTHER_US');
+  });
+  ok('场外美股（OTCBB）用 153 市场号', () => {
+    // 腾讯 ADR TCTZF 在东财是 153.TCTZF，Classify=OTCBB
+    const m = P.marketFromSuggest({ QuoteID: '153.TCTZF', Classify: 'OTCBB', Code: 'TCTZF' });
+    assert.strictEqual(m.market, 'US');
+    assert.strictEqual(P.eastmoneySecid({ code: 'TCTZF', market: 'US', usSuffix: 'PS' }), '153.TCTZF');
+    // smartbox 的 .ps 后缀也对应 153
+    const r = P.parseSmartbox('v_hint="us~tctzf.ps~腾讯控股~txkg~GP"');
+    assert.strictEqual(r[0].usSuffix, 'PS');
+    assert.strictEqual(P.eastmoneySecid(r[0]), '153.TCTZF');
+  });
+  await okAsync('美股市场号猜错时会自动换候选重试', async () => {
+    const seen = [];
+    global.fetch = async (url) => {
+      const u = String(url);
+      // 批量接口一次带全部候选 secid，只有有数据的那行会返回
+      const m = u.match(/secids=([^&]*)/);
+      const ids = m ? decodeURIComponent(m[1]).split(',') : [];
+      ids.forEach((id) => seen.push(id));
+      const diff = ids
+        .filter((id) => id === '153.TCTZF')
+        .map((id) => ({ f13: 153, f12: 'TCTZF', f14: '腾讯控股', f2: 52.674, f3: -0.85, f4: -0.452, f18: 53.126 }));
+      return { ok: true, status: 200, json: async () => ({ data: { diff } }) };
+    };
+    const [row] = await P.fetchEastmoney([{ id: 'x', code: 'TCTZF', name: '腾讯控股', market: 'US', exchange: 'OTHER_US' }]);
+    assert.strictEqual(row.ok, true, '应该换候选后取到数据');
+    assert.strictEqual(row.latestPrice, 52.674);
+    assert.ok(seen.includes('105.TCTZF') && seen.includes('153.TCTZF'), '应一次带全部候选：' + seen.join(','));
+    global.fetch = realFetch;
+  });
+
+  console.log('[16] 美股交易时段（夏令时 + 节假日）');
+  const usAt = (iso) => M.usSessionPhase(new Date(iso));
+  const usParts = (iso) => M.beijingParts(new Date(iso));
+  ok('夏令时区间：3 月第二个周日 15:00 进、11 月第一个周日 14:00 出（北京时间）', () => {
+    assert.strictEqual(M.isUsDst(usParts('2026-03-08T06:59:00Z')), false, '切换前 15:00 还是冬令时');
+    assert.strictEqual(M.isUsDst(usParts('2026-03-08T07:00:00Z')), true, '15:00 起进入夏令时');
+    assert.strictEqual(M.isUsDst(usParts('2026-11-01T05:59:00Z')), true, '切换前 14:00 还是夏令时');
+    assert.strictEqual(M.isUsDst(usParts('2026-11-01T06:00:00Z')), false, '14:00 起退出夏令时');
+    assert.strictEqual(M.isUsDst(usParts('2026-06-15T06:00:00Z')), true, '6 月是夏令时');
+    assert.strictEqual(M.isUsDst(usParts('2026-12-15T06:00:00Z')), false, '12 月是冬令时');
+  });
+  ok('夏令时时段：21:30-次日 04:00', () => {
+    // 2026-06-15 是周一，夏令时 → 北京 21:30 开盘
+    assert.strictEqual(usAt('2026-06-15T13:00:00Z').trading, false, '21:00 还没开盘');
+    assert.strictEqual(usAt('2026-06-15T13:30:00Z').trading, true, '21:30 开盘');
+    assert.strictEqual(usAt('2026-06-15T13:30:00Z').phase, 'us-trading');
+    assert.strictEqual(usAt('2026-06-15T18:00:00Z').trading, true, '次日凌晨 02:00 还在交易');
+    assert.strictEqual(usAt('2026-06-15T20:00:00Z').trading, false, '04:00 收盘');
+  });
+  ok('冬令时时段：22:30-次日 05:00', () => {
+    // 2026-12-15 是周二，冬令时
+    assert.strictEqual(usAt('2026-12-15T13:30:00Z').trading, false, '21:30 还没开盘（冬令时 22:30 才开）');
+    assert.strictEqual(usAt('2026-12-15T14:30:00Z').trading, true, '22:30 开盘');
+    assert.strictEqual(usAt('2026-12-15T20:30:00Z').trading, true, '次日凌晨 04:30 还在交易');
+    assert.strictEqual(usAt('2026-12-15T21:00:00Z').trading, false, '05:00 收盘');
+  });
+  ok('凌晨那段归属前一天：周六凌晨是美东周五下午，仍在交易', () => {
+    // 2026-06-13 是周六，北京时间凌晨 01:00 = 美东周五 13:00 → 应该还在交易
+    const s = usAt('2026-06-12T17:00:00Z');
+    assert.strictEqual(s.trading, true, '周六凌晨仍是周五的盘');
+    assert.strictEqual(s.day, '2026-06-12', '交易日归属周五（开始那天）');
+    // 周六晚上就是周末了
+    assert.strictEqual(usAt('2026-06-13T14:00:00Z').trading, false, '周六晚上不开盘');
+  });
+  ok('收盘后有快照窗口', () => {
+    const s = usAt('2026-06-15T20:10:00Z'); // 04:10 北京时间
+    assert.strictEqual(s.snapshotDue, true);
+    assert.strictEqual(s.phase, 'us-after-close');
+    assert.strictEqual(s.day, '2026-06-15');
+  });
+  ok('美股节假日休市（规则算出来的，不用维护表）', () => {
+    assert.strictEqual(M.isUsTradingDay('2026-12-25'), false, '圣诞节');
+    assert.strictEqual(M.isUsTradingDay('2026-07-03'), false, '独立日落在周六，提前到周五');
+    assert.strictEqual(M.isUsTradingDay('2026-11-26'), false, '感恩节');
+    assert.strictEqual(M.isUsTradingDay('2026-05-25'), false, '阵亡将士纪念日');
+    assert.strictEqual(M.isUsTradingDay('2026-04-03'), false, '耶稣受难日');
+    assert.strictEqual(M.isUsTradingDay('2026-01-19'), false, '马丁路德金纪念日');
+    assert.strictEqual(M.isUsTradingDay('2026-06-15'), true, '普通交易日');
+  });
+  ok('美股的休市状态细分周末/节假日（界面上要能区分，不能和正常休市混为一谈）', () => {
+    // 周六晚上（美东周五收盘后）
+    assert.strictEqual(usAt('2026-06-13T14:00:00Z').phase, 'weekend', '周六晚上是周末休市');
+    // 周一凌晨（美东周日）
+    assert.strictEqual(usAt('2026-06-14T17:00:00Z').phase, 'weekend', '周一凌晨对应美东周日');
+    // 圣诞节
+    assert.strictEqual(usAt('2026-12-25T14:30:00Z').phase, 'holiday', '圣诞节是节假日休市');
+    // 文案带上市场名，界面上才说得清是谁在休市
+    assert.strictEqual(M.describePhase('weekend', 'US'), '美股周末休市');
+    assert.strictEqual(M.describePhase('holiday', 'HK'), '港股节假日休市');
+    assert.strictEqual(M.describePhase('weekend'), '周末休市');
+  });
+  ok('调度：美股盘中继续请求（A 股已收）', () => {
+    const cfg = { marketHoursOnly: true, refreshIntervalSeconds: 3 };
+    assert.strictEqual(M.planTick(cfg, new Date('2026-06-15T18:00:00Z'), { hasUS: true }).action, 'fetch');
+    assert.strictEqual(M.planTick(cfg, new Date('2026-06-15T18:00:00Z'), {}).action, 'idle', '没有美股自选就不开美股轨');
+    const snap = M.planTick(cfg, new Date('2026-06-15T20:10:00Z'), { hasUS: true });
+    assert.strictEqual(snap.action, 'snapshot');
+    assert.strictEqual(snap.market, 'US');
+    assert.strictEqual(
+      M.planTick(cfg, new Date('2026-06-15T20:10:00Z'), { hasUS: true, usCloseSnapshotDay: '2026-06-15' }).action,
+      'idle', '同一天不重复抓',
+    );
   });
 
   console.log(`\nproviders: 共 ${passed} 项，${process.exitCode ? '有失败' : '全部通过'}`);

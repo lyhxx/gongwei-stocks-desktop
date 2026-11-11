@@ -27,8 +27,8 @@ function chartColors() {
   return {
     up: v('--up', '#d92d20'), down: v('--down', '#079455'),
     text: v('--text', '#1f2937'), muted: v('--muted', '#64748b'),
-    border: v('--border', '#e2e8f0'), bg: v('--card', '#ffffff'),
-    hover: v('--hover', '#f8fafc'), accent: v('--accent', '#336fff'), accentSoft: v('--accent-soft', '#eef2ff'),
+    border: v('--line', '#e2e8f0'), bg: v('--panel', '#ffffff'),
+    hover: v('--panel-2', '#f8fafc'), accent: v('--accent', '#336fff'), accentSoft: v('--accent-soft', '#eef2ff'),
   };
 }
 
@@ -269,12 +269,15 @@ function renderTrendsChart(data) {
   const prices = data.trends.map((t) => t.price);
   const pre = Number.isFinite(data.preClose) ? data.preClose : prices[0];
   const vols = data.trends.map((t, i) => ({ value: t.volume, itemStyle: { color: t.price >= (i ? data.trends[i - 1].price : pre) ? c.up : c.down } }));
-  // 分时右侧涨跌幅轴固定以昨收为中轴：默认 ±10%（涨跌停），若当日振幅超过 10% 再按实际放大，
-  // 这样 0% 永远在正中间，顶部 +10.00%、底部 -10.00%（超出时如 +20.00%）
-  // 涨跌幅轴上下沿正好是板块涨跌停（主板 ±10%、创业/科创 ±20%、北交所 ±30%），
-  // 当日振幅更大（新股等）才放大；港美股无涨跌停，至少 ±10% 便于观察
+  // 分时右侧涨跌幅轴固定以昨收为中轴：
+  // - A 股：上下沿正好是板块涨跌停（主板 ±10%、创业/科创 ±20%、北交所 ±30%），超出才放大；
+  // - 港股/板块没有涨跌停，用「当日实际振幅 × 1.6」兜底，
+  //   否则固定 ±10% 会把只有 1% 波动的板块压成一条直线（完全看不出走势）。
   const dev = Math.max(Math.abs(Math.max(...prices) - pre), Math.abs(pre - Math.min(...prices))) / (pre || 1);
-  const halfFrac = Math.max(limitFracOf(stock) || 0.1, dev);
+  const limFrac = limitFracOf(stock);
+  const halfFrac = limFrac
+    ? Math.max(limFrac, dev)
+    : Math.max(dev * 1.6, 0.02);
   const ext = symmetricExtent(pre, pre * halfFrac, 4);
   const timeLabel = {
     color: c.muted, fontSize: 10,

@@ -4,54 +4,84 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>工位看盘</title>
+<link rel="stylesheet" href="../shared/theme.css" />
+<link rel="stylesheet" href="../shared/chrome.css" />
 <link rel="stylesheet" href="./styles.css" />
 </head>
-<body>
-<header class="top">
-  <div class="status-block">
-    <p id="status">连接中…</p>
-  </div>
-  <div class="top-actions">
-    <button id="btnRefresh" title="立即刷新">刷新</button>
-    <button id="btnFloat" title="显示/隐藏浮窗 Ctrl+Shift+M">浮窗</button>
-    <div class="more-wrap">
-      <button id="btnMore" title="更多操作">⋯</button>
-      <div id="moreMenu" class="more-menu" hidden>
-        <button id="btnOpenSettings">设置</button>
-        <button id="btnGoSelftest">接口自检</button>
-        <button id="btnCheckUpdate">检查更新</button>
+<body class="framed">
+<div class="win">
+
+  <!-- 标题栏：自绘，负责拖动窗口 + 窗口按钮 -->
+  <header class="win-title">
+    <div class="title-left">
+      <span class="live-dot idle" id="btnStatusDot" role="button" tabindex="0" title="查看诊断"></span>
+      <span class="app-name">工位看盘</span>
+    </div>
+    <div class="title-center">
+      <span class="pill-session rest" id="sessionPill">--</span>
+      <span class="title-sub" id="breadth"></span>
+    </div>
+    <div class="title-right">
+      <button id="btnRefresh" class="icon-btn" title="立即刷新">刷新</button>
+      <button id="btnFloat" class="icon-btn" title="显示/隐藏浮窗 Ctrl+Shift+M">浮窗</button>
+      <div class="more-wrap">
+        <button id="btnMore" class="icon-btn" title="更多操作">⋯</button>
+        <div id="moreMenu" class="more-menu" hidden>
+          <button id="btnOpenSettings">设置</button>
+          <button id="btnGoSelftest">接口自检</button>
+          <button id="btnCheckUpdate">检查更新</button>
+        </div>
+      </div>
+      <div class="win-btns">
+        <button data-win-btn="minimize" title="最小化">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><line x1="1" y1="5" x2="9" y2="5" /></svg>
+        </button>
+        <button data-win-btn="close" class="close" title="关闭到托盘">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><line x1="1.5" y1="1.5" x2="8.5" y2="8.5" /><line x1="8.5" y1="1.5" x2="1.5" y2="8.5" /></svg>
+        </button>
       </div>
     </div>
-  </div>
-</header>
+  </header>
 
-<!-- 整页只有这一个滚动容器：避免自选里再套一层滚动条（展开时会出现两个） -->
-<div class="app-body">
-  <section>
-    <div class="section-head">
-      <h2>指数 <button id="btnIndicesManage" class="link-btn" title="选择显示哪些指数">管理</button></h2>
-    </div>
-    <div id="indices" class="indices-grid"></div>
-    <div id="indicesManage" class="indices-manage" hidden></div>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <h2>自选 <span id="stockCount"></span></h2>
-      <div class="search-inline">
-        <input id="kw" placeholder="加自选：代码/名称/拼音" autocomplete="off" />
-        <div id="suggest" class="suggest" hidden></div>
+  <!-- 整页只有这一个滚动容器：避免自选里再套一层滚动条 -->
+  <div class="app-body">
+    <section class="panel">
+      <div class="section-head">
+        <h2>指数 <button id="btnIndicesManage" class="link-btn" title="选择显示哪些指数">管理</button></h2>
       </div>
-    </div>
-    <div id="stocks"></div>
-  </section>
+      <div id="indices" class="indices-grid"></div>
+      <div id="indicesManage" class="indices-manage" hidden></div>
+    </section>
 
-  <footer>
-    余光一扫，涨跌了然。关闭窗口进托盘，Ctrl+Shift+M 切换浮窗。<br/>
-    <span id="appVer"></span>
+    <section class="panel">
+      <div class="section-head">
+        <h2>自选 <span id="stockCount"></span></h2>
+        <div class="search-inline">
+          <input id="kw" placeholder="加自选：代码/名称/拼音" autocomplete="off" />
+          <div id="suggest" class="suggest" hidden></div>
+        </div>
+      </div>
+      <div id="stocks"></div>
+    </section>
+  </div>
+
+  <footer class="status-bar">
+    <span id="status">连接中…</span>
+    <span class="status-spacer"></span>
     <span id="updateBadge" class="update-badge" hidden></span>
+    <span id="appVer"></span>
   </footer>
 </div>
+
+<!-- 8 向缩放手柄：放在 .win 之外，落在四周的透明边距上 -->
+<div class="win-resize" data-resize="n"></div>
+<div class="win-resize" data-resize="s"></div>
+<div class="win-resize" data-resize="w"></div>
+<div class="win-resize" data-resize="e"></div>
+<div class="win-resize" data-resize="nw"></div>
+<div class="win-resize" data-resize="ne"></div>
+<div class="win-resize" data-resize="sw"></div>
+<div class="win-resize" data-resize="se"></div>
 
 <div id="modalOverlay" class="modal-overlay" hidden>
   <div class="modal" role="dialog" aria-modal="true">
@@ -59,6 +89,7 @@
     <div id="modalBody" class="modal-body"></div>
   </div>
 </div>
+<script src="../shared/chrome.js"></script>
 <script src="./app.js"></script>
 </body>
 </html>

@@ -16,6 +16,8 @@ const chartJs = read('src/chart/chart.js');
 const alertJs = read('src/alert/alert.js');
 const preload = read('src/preload.js');
 const mainJs = read('src/main.js');
+const chromeJs = read('src/shared/chrome.js');
+const themeCss = read('src/shared/theme.css');
 const pkg = JSON.parse(read('package.json'));
 const readme = read('README.md');
 
@@ -45,7 +47,7 @@ checkDom('alert', alertHtml, alertJs);
 
 // preload 暴露面 ↔ 业务代码调用面
 const exposed = new Set([...preload.matchAll(/^\s{2}([a-zA-Z]\w*):/gm)].map((m) => m[1]));
-for (const [label, js] of [['renderer', appJs], ['float', floatJs], ['chart', chartJs], ['alert', alertJs]]) {
+for (const [label, js] of [['renderer', appJs], ['float', floatJs], ['chart', chartJs], ['alert', alertJs], ['chrome', chromeJs]]) {
   for (const m of js.matchAll(/window\.gongwei\.([a-zA-Z]\w*)/g)) {
     if (!exposed.has(m[1])) problems.push(`${label} 使用了未暴露的 window.gongwei.${m[1]}`);
   }
@@ -87,16 +89,33 @@ if (/contextIsolation\s*:\s*false/.test(mainJs)) problems.push('main.js 关闭�
 
 // 主题必须同时作用到原生窗口：只改网页内部的话，Windows 标题栏会一直是浅色
 if (!/nativeTheme\.themeSource\s*=/.test(mainJs)) {
-  problems.push('main.js 未同步 nativeTheme.themeSource，深色模式下系统标题栏不会跟着变');
+  problems.push('main.js 未同步 nativeTheme.themeSource，深色模式下渲染层不会跟着变');
 }
-if (!/themeBackground\(effectiveTheme\(\)\)/.test(mainJs)) {
-  problems.push('main.js 窗口 backgroundColor 未跟随主题，切换时可能闪白');
+// ---------- 无边框窗口（frameless）----------
+// 四个窗口都是自绘标题栏：必须关掉系统边框，否则会又冒出一条系统标题栏
+if (!/frame:\s*false/.test(mainJs)) {
+  problems.push('main.js 未关闭系统边框（frame:false），窗口不是无边框的');
 }
-// 透明浮窗一旦被设成不透明底色，透明区会被填实、圆角外露出直角（曾踩过）
-const bgCallSites = [...mainJs.matchAll(/setBackgroundColor\(/g)].map((m) => m.index);
-for (const at of bgCallSites) {
-  const ctx = mainJs.slice(Math.max(0, at - 220), at + 60);
-  if (/floatWin/.test(ctx)) problems.push('main.js 给透明浮窗设了底色，圆角外会露出直角');
+// 必须透明，否则圆角外会露出直角（不透明窗口按矩形绘制，CSS 圆角只裁内容）
+if (!/transparent:\s*true/.test(mainJs)) {
+  problems.push('main.js 未开启透明窗口（transparent:true），圆角外会露出直角');
+}
+// 透明窗口一旦被刷不透明底色，透明区会被填实、圆角外露直角（浮窗踩过这个坑）
+for (const m of mainJs.matchAll(/setBackgroundColor\(/g)) {
+  const ctx = mainJs.slice(Math.max(0, m.index - 220), m.index + 80);
+  if (/(mainWin|floatWin|chartWin|alertWin)/.test(ctx)) {
+    problems.push('main.js 给透明窗口设置了 backgroundColor：透明区会被填实，圆角外会露出直角');
+  }
+}
+// 窗口外壳不要加外阴影：transparent 窗口的绘制范围就是窗口矩形，
+// box-shadow 溢出部分会被裁掉，留边距当画布又会被裁成一圈生硬的暗边
+const chromeCss = read('src/shared/chrome.css');
+if (/\.win\s*\{[^}]*box-shadow/.test(chromeCss)) {
+  problems.push('shared/chrome.css：窗口外壳不要加 box-shadow（会被窗口边界裁成一圈暗边）');
+}
+// 窗口 = 内容，不留透明边距（那圈边距会挡住点击，且没有阴影就纯属浪费）
+if (/body\.framed\s*\{[^}]*padding/.test(chromeCss)) {
+  problems.push('shared/chrome.css：body.framed 不应留 padding 边距（窗口应当等于内容）');
 }
 // 浮窗右键要给自己的一套菜单，而不是系统默认菜单
 if (!/floatWin\.webContents\.on\('context-menu'/.test(mainJs) || !/function showFloatMenu\(/.test(mainJs)) {
@@ -126,11 +145,12 @@ const codes = defaults.INDICES.map((i) => `${i.exchange}.${i.code}`);
 if (new Set(codes).size !== codes.length) problems.push('内置指数存在重复代码');
 
 // hidden 兜底：任何带 display 的元素用 hidden 隐藏时都必须真的不显示
-const styles = read('src/renderer/styles.css');
-if (!/\[hidden\]\s*\{\s*display:\s*none\s*!important/.test(styles)) {
-  problems.push('styles.css 缺少全局兜底规则：[hidden] { display: none !important; }');
+// 这条规则放在共享主题层（四个窗口都引用了它），保证到处都生效
+if (!/\[hidden\]\s*\{\s*display:\s*none\s*!important/.test(themeCss)) {
+  problems.push('shared/theme.css 缺少全局兜底规则：[hidden] { display: none !important; }');
 }
 // 被 JS 用 .hidden 控制的静态 id，其样式若声明了 display 就必须有 [hidden] 同伴
+const styles = read('src/renderer/styles.css');
 const hiddenIdClasses = {};
 for (const m of rendererHtml.matchAll(/<[^>]*id="([^"]+)"[^>]*class="([^"]*)"[^>]*hidden[^>]*>/g)) {
   hiddenIdClasses[m[1]] = m[2].split(/\s+/).filter(Boolean);

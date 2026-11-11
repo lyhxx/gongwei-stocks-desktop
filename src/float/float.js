@@ -118,7 +118,8 @@ function render(forceSync) {
 function applyFloatTheme() {
   const t = state.settings.main.theme;
   const dark = t === 'dark' || (t !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  document.querySelector('.card').dataset.theme = dark ? 'dark' : 'light';
+  // 主题挂在 <html> 上，和主窗口/K线/提醒窗口共用同一套变量（shared/theme.css）
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
 }
 
 function escapeHtml(s) {

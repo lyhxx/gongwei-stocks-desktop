@@ -1,34 +1,46 @@
-html, body { margin: 0; background: transparent; font-family: "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; }
-.card {
-  background: rgba(248, 250, 252, .97);
-  border: 1px solid rgba(148, 163, 184, .5);
-  border-radius: 8px;
+/* 工位看盘 - 浮窗样式（主题变量见 ../shared/theme.css）
+ *
+ * 浮窗是唯一「窗口 == 内容」的窗口：它压在别的窗口上面，
+ * 四周多一圈透明边距就会挡住下面窗口的点击（项目踩过这个坑）。
+ * 代价是 box-shadow 溢出窗口的部分会被裁掉，所以浮窗靠描边而不是阴影立体。
+ */
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: transparent;
+  font-family: var(--font-ui);
   overflow: hidden;
-  box-shadow: 0 16px 42px rgba(15, 23, 42, .18);
+}
+.card {
+  background: color-mix(in srgb, var(--panel) 95%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  color: var(--text);
   -webkit-app-region: drag;
 }
 
-/* 顶栏：极简，只放更新时间和涨跌家数 */
+/* 顶栏：更新时间 + 涨跌家数 */
 header {
   display: flex; justify-content: space-between; align-items: center;
   padding: 5px 9px 4px;
-  border-bottom: 1px solid rgba(148, 163, 184, .35);
+  border-bottom: 1px solid var(--line-soft);
 }
-header span { font-size: 10px; color: #64748b; font-variant-numeric: tabular-nums; }
+header span { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 #stat { letter-spacing: .3px; }
 
 /* 指数：横排卡片，自适应每行 3~4 个 */
 .idx-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
   gap: 5px; padding: 6px 8px 6px 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, .35);
+  border-bottom: 1px solid var(--line-soft);
 }
 .idx-grid:empty { display: none; }
 .idx-card {
   min-width: 0; padding: 4px 6px; border-radius: 6px;
-  background: rgba(255, 255, 255, .6); border: 1px solid rgba(148, 163, 184, .3);
+  background: var(--panel-2); border: 1px solid var(--line-soft);
 }
-.idx-name { font-size: 10px; color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.idx-name { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .idx-price { font-size: 12px; font-weight: 800; margin-top: 1px; font-variant-numeric: tabular-nums; }
 .idx-pct { font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
@@ -39,33 +51,7 @@ header span { font-size: 10px; color: #64748b; font-variant-numeric: tabular-num
 .line strong { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
 .line em { font-style: normal; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
 
-.up { color: #d92d20; }
-.down { color: #079455; }
-.empty { padding: 14px 8px; text-align: center; color: #64748b; font-size: 11px; line-height: 1.7; }
+.empty { padding: 14px 8px; text-align: center; color: var(--muted); font-size: 11px; line-height: 1.7; }
 
 .flash { animation: flash .6s ease 3; }
-@keyframes flash { 50% { background: rgba(51, 111, 255, .25); } }
-
-/* 滚动条：与主界面同一套风格。
-   不要写 scrollbar-width / scrollbar-color —— Chromium 收到标准属性会忽略 ::-webkit-scrollbar */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: #c3cad4; border-radius: 8px;
-  border: 2px solid transparent; background-clip: content-box;
-}
-::-webkit-scrollbar-thumb:hover { background: #94a3b8; background-clip: content-box; }
-::-webkit-scrollbar-button, ::-webkit-scrollbar-corner { display: none; width: 0; height: 0; background: transparent; }
-
-/* 深色跟随主窗口主题 */
-.card[data-theme="dark"] { background: rgba(20, 28, 40, .97); border-color: rgba(100, 116, 139, .6); color: #e6edf5; }
-.card[data-theme="dark"] header { border-bottom-color: rgba(100, 116, 139, .45); }
-.card[data-theme="dark"] header span { color: #a8b3c2; }
-.card[data-theme="dark"] .idx-grid { border-bottom-color: rgba(100, 116, 139, .45); }
-.card[data-theme="dark"] .idx-card { background: rgba(38, 53, 71, .55); border-color: rgba(100, 116, 139, .4); }
-.card[data-theme="dark"] .idx-name { color: #a8b3c2; }
-.card[data-theme="dark"] .empty { color: #a8b3c2; }
-.card[data-theme="dark"] .up { color: #ff6b61; }
-.card[data-theme="dark"] .down { color: #34d399; }
-.card[data-theme="dark"] ::-webkit-scrollbar-thumb { background: #3b4a61; }
-.card[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #55677f; }
+@keyframes flash { 50% { background: var(--accent-soft); } }

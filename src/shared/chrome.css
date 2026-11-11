@@ -1,0 +1,127 @@
+/* 工位看盘 - 共享窗口装饰层（无边框窗口）
+ *
+ * 四个窗口（主界面 / K线 / 提醒，以及未来的浮窗）共用同一套外壳：
+ *   body.framed  →  窗口本体透明
+ *   .win         →  真正有颜色、有圆角的内容壳
+ *   .win-title   →  自绘标题栏（拖拽区 + 窗口按钮）
+ *   .win-resize  →  8 向缩放手柄
+ *
+ * 为什么没有阴影：transparent 窗口的绘制范围就是窗口矩形，box-shadow 溢出部分会被直接裁掉。
+ * 早先留了 14px 透明边距当阴影画布，结果 18px 的阴影被裁成一圈生硬的暗边，
+ * 看着像「窗口外面糊了一块」。索性去掉 —— 窗口 = 内容，边缘只留 1px 描边。
+ */
+
+body.framed {
+  overflow: hidden;
+  background: transparent;
+}
+
+.win {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--win-radius);
+}
+html.win-maximized .win {
+  border-radius: 0;
+  border-width: 0;
+}
+
+/* ---------- 标题栏 ---------- */
+.win-title {
+  flex: none;
+  position: relative;
+  /* 高于缩放手柄：手柄压在内容最外圈，标题栏（和窗口按钮）不能被它们盖住 */
+  z-index: 30;
+  height: var(--win-title-h);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 0 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-soft);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+/* 标题栏里的可交互元素要显式关掉拖拽，否则点不动 */
+.win-title button,
+.win-title input,
+.win-title select,
+.win-title a,
+.win-title .no-drag { -webkit-app-region: no-drag; }
+
+.win-title .title-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.win-title .title-center { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; justify-content: flex-end; }
+.win-title .title-right { display: flex; align-items: center; gap: 6px; }
+
+.app-name { font-size: 12px; font-weight: 700; letter-spacing: .4px; color: var(--text); }
+.title-sub { font-size: 11px; color: var(--dim); }
+
+/* 标题栏上的状态胶囊（交易中 / 午间休市 …） */
+.pill-session {
+  font-size: 11px; font-weight: 700;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--panel-3); color: var(--muted);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.pill-session.live { background: var(--down-soft); color: var(--down); border-color: transparent; }
+.pill-session.rest { background: var(--panel-3); color: var(--muted); }
+.pill-session.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+
+/* 呼吸状态灯 */
+.live-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--dim);
+}
+.live-dot.ok { background: var(--down); box-shadow: 0 0 0 3px var(--down-soft); }
+.live-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.live-dot.idle { background: var(--dim); }
+.live-dot.live { background: var(--down); animation: dot-breathe 2.4s ease-in-out infinite; }
+/* 状态灯在标题栏里是可点的（点开看诊断），要给键盘用户一个焦点提示 */
+.live-dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 50%; }
+.live-dot:hover { box-shadow: 0 0 0 3px var(--accent-soft); }
+@keyframes dot-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--down-soft); }
+  50% { box-shadow: 0 0 0 4px transparent; }
+}
+
+/* ---------- 窗口按钮 ---------- */
+.win-btns { display: flex; align-items: center; -webkit-app-region: no-drag; margin-left: 4px; }
+.win-btns button {
+  width: 42px; height: var(--win-title-h);
+  border: none; background: transparent; border-radius: 0;
+  color: var(--muted);
+  display: grid; place-items: center;
+  padding: 0;
+  font-size: 13px; line-height: 1;
+}
+.win-btns button:hover { background: var(--panel-3); color: var(--text); }
+.win-btns button.close:hover { background: #e5484d; color: #fff; }
+.win-btns button svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; }
+
+/* ---------- 缩放手柄 ---------- */
+/* 窗口 = 内容，手柄就压在内容最外圈（4px）。
+   标题栏的 z-index 更高，所以标题栏那一条是拖动而不是缩放，窗口按钮也点得到。 */
+.win-resize {
+  position: fixed;
+  z-index: 20;
+  -webkit-app-region: no-drag;
+}
+.win-resize[data-resize="n"]  { top: 0; left: 12px; right: 12px; height: 4px; cursor: ns-resize; }
+.win-resize[data-resize="s"]  { bottom: 0; left: 12px; right: 12px; height: 4px; cursor: ns-resize; }
+.win-resize[data-resize="w"]  { left: 0; top: 0; bottom: 12px; width: 4px; cursor: ew-resize; }
+.win-resize[data-resize="e"]  { right: 0; top: 0; bottom: 12px; width: 4px; cursor: ew-resize; }
+.win-resize[data-resize="nw"] { top: 0; left: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+.win-resize[data-resize="ne"] { top: 0; right: 0; width: 10px; height: 10px; cursor: nesw-resize; }
+.win-resize[data-resize="sw"] { bottom: 0; left: 0; width: 10px; height: 10px; cursor: nesw-resize; }
+.win-resize[data-resize="se"] { bottom: 0; right: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+/* 铺满/最大化状态下不需要手柄 */
+html.win-maximized .win-resize { display: none; }
+
+/* 拖拽/缩放过程中禁掉文本选中与指针样式闪烁 */
+body.dragging-active, body.resizing-active { cursor: grabbing; user-select: none; }
+body.resizing-active * { pointer-events: none; }

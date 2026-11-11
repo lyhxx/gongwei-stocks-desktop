@@ -15,12 +15,13 @@ function quoteOf(stockId) {
     || market.indexQuotes.find((q) => q.stockId === stockId);
 }
 
-// 品种标签：股票不显示，基金/可转债/港美股给个小标记，避免把 ETF 当股票看
+// 品种标签：股票不显示，基金/可转债/板块/港美股给个小标记，避免把 ETF 当股票看
 function typeLabel(item) {
   if (!item) return '';
   const t = item.securityType || 'stock';
   if (t === 'fund') return /^(16\d{4}|(?:501|502|506)\d{3})$/.test(item.code) ? 'LOF' : 'ETF';
   if (t === 'bond') return '债';
+  if (t === 'board') return '板';
   if (t === 'index') return '指';
   if (item.market === 'HK') return '港';
   if (item.market === 'US') return '美';
@@ -43,7 +44,13 @@ async function boot() {
   window.gongwei.onMarket((m) => { market = m; updateMarketUI(); });
   window.gongwei.onStore((s) => { state = s; renderAll(); });
   window.gongwei.onUpdateState((u) => renderUpdateBadge(u));
-  window.gongwei.onSession((s) => { session = s; renderStatus(); });
+  window.gongwei.onSession((s) => { session = s; renderStatus(); renderSessionPill(); });
+  // 推送只在时段变化时发生，首次推送可能早于页面加载完成而丢失 —— 主动拉一次补上
+  if (window.gongwei.getSession) {
+    window.gongwei.getSession()
+      .then((s) => { if (s) { session = s; renderStatus(); renderSessionPill(); } })
+      .catch(() => { /* 忽略 */ });
+  }
   window.gongwei.onOpenSettings(() => openSettings());
   window.gongwei.onAlert((p) => {
     const channels = state.settings.alerts.channels || [];
@@ -146,7 +153,7 @@ async function runSelftest() {
   const box = $('selftestResult');
   btn.disabled = true;
   $('btnCopySelftest').disabled = true;
-  box.innerHTML = '<p class="hint">自检中（9 条并行，约 10 秒）…</p>';
+  box.innerHTML = '<p class="hint">自检中（8 条并行，约 10 秒）…</p>';
   try {
     lastSelftest = await window.gongwei.selftest();
     const pass = lastSelftest.results.filter((r) => r.ok).length;
@@ -180,6 +187,8 @@ function renderAll() {
   renderStocks();
   renderIndices();
   renderStatus();
+  renderSessionPill();
+  renderBreadth();
   fillSettings();
   // 注意：管理面板只在打开/勾选时手动画，不跟随轮询重绘（否则复选框每 3 秒重建，点不开也关不上）
 }
@@ -189,6 +198,21 @@ function updateMarketUI() {
   updateStocksQuotes();
   updateIndicesValues();
   renderStatus();
+  renderSessionPill();
+  renderBreadth();
+}
+
+// 标题栏的涨跌家数：一眼看今天手里是红多还是绿多
+function renderBreadth() {
+  const el = $('breadth');
+  if (!el) return;
+  let up = 0;
+  let down = 0;
+  for (const q of (market.stockQuotes || [])) {
+    if (!q || !q.ok || !Number.isFinite(q.changePercent)) continue;
+    if (q.changePercent >= 0) up += 1; else down += 1;
+  }
+  el.textContent = (up + down) ? `涨${up} 跌${down}` : '';
 }
 
 function updateStocksQuotes() {
@@ -227,20 +251,21 @@ function updateIndicesValues() {
 
 function renderStatus(text) {
   const el = $('status');
-  if (text) { el.innerHTML = `<span class="live-dot warn"></span>${escapeHtml(text)}`; return; }
-  const t = market.updatedAt ? new Date(market.updatedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
   const nErr = (market.errors || []).length;
   const live = !market.updatedAt ? 'idle' : (nErr ? 'warn' : 'ok');
-  // 非交易时段直接标出来，用户就知道"数据不动是正常的"，而不是以为软件坏了
-  const stopped = session && session.label && !session.trading;
-  const sessionText = stopped ? ` · ${escapeHtml(session.label)}` : '';
-  el.innerHTML = `<span class="live-dot ${live}" id="btnStatusDot" role="button" tabindex="0" title="查看诊断"></span>更新 ${t} · ${escapeHtml(market.source || 'none')}${sessionText} · 共${state.stocks.length}只`;
-  // 状态灯点击即可看诊断（不再单独放诊断按钮）
-  const dot = document.getElementById('btnStatusDot');
+  // 状态灯在标题栏里（点它看诊断），这里只管文字与异常喇叭
+  const dot = $('btnStatusDot');
   if (dot) {
+    dot.className = `live-dot ${live}`;
     dot.onclick = () => showDiagnose();
     dot.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showDiagnose(); } };
   }
+  if (text) { el.innerHTML = `<span class="warn-text">${escapeHtml(text)}</span>`; return; }
+  const t = market.updatedAt ? new Date(market.updatedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
+  // 非交易时段直接标出来，用户就知道"数据不动是正常的"，而不是以为软件坏了
+  const stopped = session && session.label && !session.trading;
+  const sessionText = stopped ? ` · ${escapeHtml(session.label)}` : '';
+  el.innerHTML = `更新 ${t} · ${escapeHtml(market.source || 'none')}${sessionText} · 共${state.stocks.length}只`;
   // 有异常再挂一个黄色小喇叭，更醒目
   if (nErr) {
     const horn = document.createElement('button');
@@ -254,15 +279,34 @@ function renderStatus(text) {
   }
 }
 
+// 标题栏的状态胶囊：交易时段一眼可见（集合竞价 / 午间休市 / 美股周末休市 …）
+function renderSessionPill() {
+  const pill = $('sessionPill');
+  if (!pill) return;
+  const label = session && session.label ? session.label : '--';
+  pill.textContent = label;
+  const trading = !!(session && session.trading);
+  const err = (market.errors || []).length > 0;
+  pill.className = `pill-session ${trading ? (err ? 'warn' : 'live') : 'rest'}`;
+  // 悬停显示三个市场各自的状态（胶囊只能显示一条，其余的放在提示里）
+  if (session) {
+    const parts = [];
+    if (session.cn) parts.push(`A股：${session.cn.label}`);
+    if (session.hk) parts.push(`港股：${session.hk.label}`);
+    if (session.us) parts.push(`美股：${session.us.label}`);
+    pill.title = parts.join('\n');
+  }
+}
+
 // 行情全挂时给一句人话解释，避免用户面对一串 timeout 发懵
 function diagnoseHint(d) {
   const errs = d.errors || [];
   if (!errs.length) return '';
   if (d.source && d.source !== 'none') return '';
-  const allFail = errs.length >= 3;
+  const allFail = errs.length >= 2;
   const timeouts = errs.filter((e) => /timeout/i.test(e)).length;
   if (allFail && timeouts >= 2) {
-    return '三个通道同时超时，基本可以判定是网络问题：断网、切换网络中，或公司网络/代理拦截了行情站点。等网络恢复会自动重连，也可点「接口自检」逐条确认。';
+    return '所有通道同时超时，基本可以判定是网络问题：断网、切换网络中，或公司网络/代理拦截了行情站点。等网络恢复会自动重连，也可点「接口自检」逐条确认。';
   }
   if (errs.some((e) => /no ok rows|empty data/i.test(e))) {
     return '有通道能连上但没有数据，通常是非交易时段停牌/休市，或该指数只有单一通道支持。';
@@ -823,6 +867,17 @@ function closeSuggest() {
   $('suggest').innerHTML = '';
 }
 
+// 交易所显示名：代码太长（BOARD / HKEX / OTHER_US）不适合塞进联想下拉
+const EXCHANGE_NAMES = {
+  SH: '沪', SZ: '深', BJ: '京',
+  HKEX: '港股', HK: '港股', OTHER_US: '美股',
+  BOARD: '板块',
+};
+function exchangeLabel(item) {
+  const raw = (item && item.exchange) || '';
+  return EXCHANGE_NAMES[raw] || raw;
+}
+
 function paintSuggest() {
   const box = $('suggest');
   box.innerHTML = '';
@@ -830,7 +885,7 @@ function paintSuggest() {
     const div = document.createElement('div');
     div.className = 'suggest-item' + (i === suggestActive ? ' active' : '');
     const tl = typeLabel(it);
-    div.innerHTML = `<strong>${escapeHtml(it.name)}</strong><span class="code">${escapeHtml(it.code)}</span><span class="ex">${tl ? `${tl} · ` : ''}${escapeHtml(it.exchange || '')}</span>`;
+    div.innerHTML = `<strong>${escapeHtml(it.name)}</strong><span class="code">${escapeHtml(it.code)}</span><span class="ex">${tl ? `${tl} · ` : ''}${escapeHtml(exchangeLabel(it))}</span>`;
     div.onmousedown = (e) => { e.preventDefault(); pickSuggest(i); };
     box.appendChild(div);
   });
