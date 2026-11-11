@@ -1,19 +1,17 @@
 # 工位看盘
 
-> 隐蔽、轻量的 Windows 桌面行情助手 —— 常驻托盘的自选盯盘工具。
+隐蔽、轻量的 Windows 桌面行情助手 —— 常驻托盘的自选盯盘工具。
 
-<p align="center">
-  <a href="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml">
-    <img src="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml/badge.svg" alt="build">
-  </a>
-  <img src="https://img.shields.io/badge/platform-Windows-0078d4" alt="platform">
-  <img src="https://img.shields.io/badge/electron-33-47848F" alt="electron">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
-</p>
+<a href="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml">
+  <img src="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml/badge.svg" alt="build">
+</a>
+<img src="https://img.shields.io/badge/platform-Windows-0078d4" alt="platform">
+<img src="https://img.shields.io/badge/electron-33-47848F" alt="electron">
+<img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 
 ---
 
-## 这是什么
+## 简介
 
 工位看盘把「现在什么价、涨了多少、要不要提醒」压缩成一块常驻桌面的小浮窗，
 需要细节时再打开完整窗口。它面向**盯自己那几只票**的场景，而不是做行情终端。
