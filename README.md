@@ -2,13 +2,6 @@
 
 隐蔽、轻量的 Windows 桌面行情助手 —— 常驻托盘的自选盯盘工具。
 
-<a href="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml">
-  <img src="https://github.com/lyhxx/gongwei-stocks-desktop/actions/workflows/build-win.yml/badge.svg" alt="build">
-</a>
-<img src="https://img.shields.io/badge/platform-Windows-0078d4" alt="platform">
-<img src="https://img.shields.io/badge/electron-33-47848F" alt="electron">
-<img src="https://img.shields.io/badge/license-MIT-green" alt="license">
-
 ---
 
 ## 简介
